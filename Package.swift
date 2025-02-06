@@ -11,10 +11,15 @@ let package = Package(
             name: "DeepLinkNow",
             targets: ["DeepLinkNow"]),
     ],
+    dependencies: [],
     targets: [
         .target(
             name: "DeepLinkNow",
-            dependencies: []),
+            dependencies: [],
+            linkerSettings: [
+                .linkedFramework("CoreTelephony"),
+                .linkedFramework("AdSupport")
+            ]),
         .testTarget(
             name: "DeepLinkNowTests",
             dependencies: ["DeepLinkNow"]),

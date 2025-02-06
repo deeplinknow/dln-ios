@@ -133,7 +133,12 @@ Pod::Spec.new do |s|
   # spec.libraries = "iconv", "xml2"
 
   # Framework dependencies
-  s.frameworks = 'UIKit', 'Foundation'
+  s.frameworks = [
+    'UIKit',
+    'Foundation',
+    'CoreTelephony',
+    'AdSupport'
+  ]
 
 
   # ――― Project Settings ――――――――――――――――――――――――――――――――――――――――――――――――――――――――― #
@@ -155,4 +160,9 @@ Pod::Spec.new do |s|
 
   # Add any dependencies your SDK needs
   # s.dependency 'SomeExternalDependency', '~> 1.0'
+
+  s.pod_target_xcconfig = {
+    'SWIFT_INCLUDE_PATHS' => '$(PODS_TARGET_SRCROOT)/Sources',
+    'OTHER_LDFLAGS' => '-framework CoreTelephony -framework AdSupport'
+  }
 end

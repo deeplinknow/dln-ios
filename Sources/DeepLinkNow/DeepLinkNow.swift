@@ -1,9 +1,11 @@
 import UIKit
 import Foundation
+import CoreTelephony
+import AdSupport
 
 public final class DeepLinkNow {
-    private let config: DLNConfig
     private static var shared: DeepLinkNow?
+    private let config: DLNConfig
     
     private init(config: DLNConfig) {
         self.config = config
@@ -14,7 +16,7 @@ public final class DeepLinkNow {
     }
     
     public static func checkClipboard() -> String? {
-        guard let shared = shared else {
+        if shared == nil {
             print("DeepLinkNow SDK not initialized. Call initialize() first")
             return nil
         }
@@ -22,13 +24,23 @@ public final class DeepLinkNow {
         return UIPasteboard.general.string
     }
     
-    private func makeAPIRequest(endpoint: String, method: String = "GET", body: [String: Any]? = nil) async throws -> Data {
-        guard var urlComponents = URLComponents(string: "\(config.apiBaseURL)/\(endpoint)") else {
+    public static func makeAPIRequest(endpoint: String, method: String = "GET", body: [String: Any]? = nil) async throws -> Data {
+        guard let shared = shared else {
+            throw DLNError.notInitialized
+        }
+        
+        let urlComponents = URLComponents {
+            $0.scheme = "https"
+            $0.host = "api.deeplinknow.com"
+            $0.path = "/v1/\(endpoint)"
+        }
+        
+        guard let url = urlComponents.url else {
             throw DLNError.invalidURL
         }
         
-        var request = URLRequest(url: urlComponents.url!)
-        request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(shared.config.apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpMethod = method
         
@@ -48,7 +60,7 @@ public final class DeepLinkNow {
     public typealias DeferredDeepLinkHandler = (URL?, DLNAttribution?) -> Void
     
     public static func checkDeferredDeepLink(completion: @escaping DeferredDeepLinkHandler) {
-        guard let shared = shared else {
+        if shared == nil {
             print("DeepLinkNow SDK not initialized. Call initialize() first")
             completion(nil, nil)
             return
@@ -73,7 +85,7 @@ public final class DeepLinkNow {
         
         Task {
             do {
-                let data = try await shared.makeAPIRequest(
+                let data = try await DeepLinkNow.makeAPIRequest(
                     endpoint: "deferred_deeplink",
                     method: "POST",
                     body: body
@@ -110,16 +122,15 @@ public final class DeepLinkNow {
         path: String,
         customParameters: DLNCustomParameters? = nil
     ) -> URL? {
-        guard let shared = shared else { return nil }
-        
-        var components = URLComponents()
-        components.scheme = "deeplinknow"
-        components.host = "app"
-        components.path = path
-        
-        if let params = customParameters?.dictionary {
-            components.queryItems = params.map { key, value in
-                URLQueryItem(name: key, string: String(describing: value))
+        let components = URLComponents {
+            $0.scheme = "deeplinknow"
+            $0.host = "app"
+            $0.path = path
+            
+            if let params = customParameters?.dictionary {
+                $0.queryItems = params.compactMap { key, value in
+                    URLQueryItem(name: key, value: String(describing: value))
+                }
             }
         }
         
@@ -145,7 +156,10 @@ public final class DeepLinkNow {
     }
 }
 
-struct DeferredDeepLinkResponse: Codable {
-    let deepLink: String?
-    let attribution: DLNAttribution?
+// Helper extension
+private extension URLComponents {
+    init(_ configure: (inout URLComponents) -> Void) {
+        self.init()
+        configure(&self)
+    }
 } 

@@ -1,3 +1,7 @@
+import UIKit
+import CoreTelephony
+import AdSupport
+
 public struct DLNDeviceFingerprint {
     let deviceModel: String
     let systemVersion: String
@@ -12,20 +16,29 @@ public struct DLNDeviceFingerprint {
         let device = UIDevice.current
         let screen = UIScreen.main
         
+        var carrier: String?
+        if #available(iOS 12.0, *) {
+            carrier = CTTelephonyNetworkInfo().serviceSubscriberCellularProviders?.values.first?.carrierName
+        }
+        
+        var advertisingId: String?
+        if ASIdentifierManager.shared().isAdvertisingTrackingEnabled {
+            advertisingId = ASIdentifierManager.shared().advertisingIdentifier.uuidString
+        }
+        
         return DLNDeviceFingerprint(
             deviceModel: device.model,
             systemVersion: device.systemVersion,
             screenResolution: "\(screen.bounds.width)x\(screen.bounds.height)",
             timezone: TimeZone.current.identifier,
             language: Locale.current.languageCode ?? "",
-            carrier: CTTelephonyNetworkInfo().serviceSubscriberCellularProviders?.values.first?.carrierName,
+            carrier: carrier,
             ipAddress: DLNDeviceFingerprint.getIPAddress(),
-            advertisingIdentifier: ASIdentifierManager.shared().advertisingIdentifier.uuidString
+            advertisingIdentifier: advertisingId
         )
     }
     
     private static func getIPAddress() -> String? {
-        // Implementation for getting IP address
-        // ...
+        return nil // Placeholder implementation
     }
 } 
