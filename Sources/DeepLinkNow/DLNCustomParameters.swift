@@ -1,4 +1,4 @@
-public struct DLNCustomParameters: Codable {
+public struct DLNCustomParameters: Codable, Sendable {
     private var parameters: [String: CodableValue]
     
     public init(_ parameters: [String: Any] = [:]) {
@@ -46,7 +46,7 @@ public struct DLNCustomParameters: Codable {
     }
 }
 
-private struct CodableValue: Codable {
+private struct CodableValue: Codable, Sendable {
     let value: Any
     
     init(_ value: Any) {

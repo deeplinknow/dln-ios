@@ -1,4 +1,4 @@
-public struct DeferredDeepLinkResponse: Codable {
+public struct DeferredDeepLinkResponse: Codable, Sendable {
     public let deepLink: String?
     public let attribution: DLNAttribution?
     public let customParameters: DLNCustomParameters?

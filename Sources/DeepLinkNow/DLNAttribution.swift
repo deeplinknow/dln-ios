@@ -1,4 +1,4 @@
-public struct DLNAttribution: Codable {
+public struct DLNAttribution: Codable, Sendable {
     public let channel: String?
     public let campaign: String?
     public let medium: String?
