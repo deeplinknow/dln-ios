@@ -11,17 +11,28 @@ public final class DeepLinkNow {
         self.config = config
     }
     
-    public static func initialize(apiKey: String) {
-        shared = DeepLinkNow(config: DLNConfig(apiKey: apiKey))
+    private func log(_ message: String, _ args: Any...) {
+        if config.enableLogs {
+            print("[DeepLinkNow] \(message)", args)
+        }
+    }
+    
+    public static func initialize(apiKey: String, config: [String: Any] = [:]) {
+        let enableLogs = config["enableLogs"] as? Bool ?? false
+        shared = DeepLinkNow(config: DLNConfig(apiKey: apiKey, enableLogs: enableLogs))
+        shared?.log("Initialized with config:", ["apiKey": apiKey, "config": config])
     }
     
     public static func checkClipboard() -> String? {
-        if shared == nil {
-            print("DeepLinkNow SDK not initialized. Call initialize() first")
+        guard let shared = shared else {
+            print("[DeepLinkNow] SDK not initialized. Call initialize() first")
             return nil
         }
         
-        return UIPasteboard.general.string
+        shared.log("Checking clipboard")
+        let content = UIPasteboard.general.string
+        shared.log("Clipboard content:", content ?? "nil")
+        return content
     }
     
     public static func makeAPIRequest(endpoint: String, method: String = "GET", body: [String: Any]? = nil) async throws -> Data {
