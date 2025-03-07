@@ -1,26 +1,14 @@
 func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
     // Initialize SDK
-    DeepLinkNow.initialize(apiKey: "your-api-key-here")
-    
-    // Set up deep link routing with custom parameters
-    let router = DLNRouter()
-    
-    // Register a route that handles custom parameters
-    router.register(pattern: "product/:id") { url, params in
-        if let parsed = DeepLinkNow.parseDeepLink(url) {
-            // Access custom parameters
-            let productId = params["id"]
-            let referrer = parsed.parameters.string("referrer")
-            let isPromo = parsed.parameters.bool("is_promo") ?? false
-            let discount = parsed.parameters.int("discount")
-            
-            // Navigate to product page with custom parameters
-            navigateToProduct(
-                id: productId,
-                referrer: referrer,
-                isPromo: isPromo,
-                discount: discount
-            )
+    Task {
+        await DeepLinkNow.initialize(apiKey: "your-api-key-here")
+        
+        // Check for deferred deep links
+        if let match = await DeepLinkNow.findDeferredUser() {
+            // Handle the match
+            if let deepLink = match.deepLink {
+                // Open the deep link
+            }
         }
     }
     

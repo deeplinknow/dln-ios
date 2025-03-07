@@ -1,10 +1,11 @@
 public struct DLNConfig {
     let apiKey: String
-    let apiBaseURL: String = "https://deeplinknow.com/api/v1"
     let enableLogs: Bool
+    let customDomain: String?
     
-    public init(apiKey: String, enableLogs: Bool = false) {
+    public init(apiKey: String, enableLogs: Bool = false, customDomain: String? = nil) {
         self.apiKey = apiKey
         self.enableLogs = enableLogs
+        self.customDomain = customDomain
     }
 } 

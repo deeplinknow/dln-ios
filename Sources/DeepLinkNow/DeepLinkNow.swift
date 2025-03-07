@@ -6,6 +6,9 @@ import AdSupport
 public final class DeepLinkNow {
     private static var shared: DeepLinkNow?
     private let config: DLNConfig
+    private let installTime: String = Date().toISO8601String()
+    private var initResponse: InitResponse?
+    private var validDomains: Set<String> = ["deeplinknow.com", "deeplink.now"]
     
     private init(config: DLNConfig) {
         self.config = config
@@ -13,37 +16,110 @@ public final class DeepLinkNow {
     
     private func log(_ message: String, _ args: Any...) {
         if config.enableLogs {
-            print("[DeepLinkNow] \(message)", args)
+            print("[DeepLinkNow]", message, args)
         }
     }
     
-    public static func initialize(apiKey: String, config: [String: Any] = [:]) {
-        let enableLogs = config["enableLogs"] as? Bool ?? false
-        shared = DeepLinkNow(config: DLNConfig(apiKey: apiKey, enableLogs: enableLogs))
-        shared?.log("Initialized with config:", ["apiKey": apiKey, "config": config])
+    private func warn(_ message: String) {
+        print("[DeepLinkNow] Warning:", message)
     }
     
-    public static func checkClipboard() -> String? {
+    public static func initialize(apiKey: String, config: [String: Any] = [:]) async {
+        let enableLogs = config["enableLogs"] as? Bool ?? false
+        let customDomain = config["customDomain"] as? String
+        let instance = DeepLinkNow(config: DLNConfig(
+            apiKey: apiKey,
+            enableLogs: enableLogs,
+            customDomain: customDomain
+        ))
+        shared = instance
+        
+        // Make initialization request
+        do {
+            let data = try await instance.makeAPIRequest(
+                endpoint: "init",
+                method: "POST",
+                body: ["api_key": apiKey]
+            )
+            
+            let decoder = JSONDecoder()
+            let response = try decoder.decode(InitResponse.self, from: data)
+            instance.initResponse = response
+            
+            // Cache valid domains
+            instance.validDomains.formUnion(
+                response.app.customDomains
+                    .compactMap { $0.domain }
+                    .filter { $0.verified == true }
+            )
+            
+            instance.log("Initialization successful", response)
+        } catch {
+            instance.warn("Initialization failed: \(error)")
+        }
+    }
+    
+    public static func isValidDomain(_ domain: String) -> Bool {
+        guard let shared = shared else { return false }
+        return shared.validDomains.contains(domain)
+    }
+    
+    private func getFingerprint() -> [String: Any] {
+        let device = UIDevice.current
+        return [
+            "user_agent": "DeepLinkNow-iOS/\(device.systemVersion)",
+            "platform": "ios",
+            "os_version": device.systemVersion,
+            "device_model": device.model,
+            "language": Locale.current.languageCode ?? "en",
+            "timezone": TimeZone.current.identifier,
+            "installed_at": installTime,
+            "last_opened_at": Date().toISO8601String(),
+            "device_id": nil,
+            "advertising_id": nil,
+            "vendor_id": nil,
+            "hardware_fingerprint": nil
+        ]
+    }
+    
+    public static func findDeferredUser() async -> MatchResponse? {
         guard let shared = shared else {
             print("[DeepLinkNow] SDK not initialized. Call initialize() first")
             return nil
         }
         
-        shared.log("Checking clipboard")
-        let content = UIPasteboard.general.string
-        shared.log("Clipboard content:", content ?? "nil")
-        return content
+        shared.log("Finding deferred user...")
+        
+        let matchRequest: [String: Any] = [
+            "fingerprint": shared.getFingerprint()
+        ]
+        
+        shared.log("Sending match request:", matchRequest)
+        
+        do {
+            let data = try await shared.makeAPIRequest(
+                endpoint: "match",
+                method: "POST",
+                body: matchRequest
+            )
+            
+            let decoder = JSONDecoder()
+            let response = try decoder.decode(MatchResponse.self, from: data)
+            shared.log("Match response:", response)
+            return response
+            
+        } catch {
+            shared.warn("API request failed: \(error)")
+            return nil
+        }
     }
     
-    public static func makeAPIRequest(endpoint: String, method: String = "GET", body: [String: Any]? = nil) async throws -> Data {
-        guard let shared = shared else {
-            throw DLNError.notInitialized
-        }
-        
+    private func makeAPIRequest(endpoint: String, method: String = "GET", body: [String: Any]? = nil) async throws -> Data {
+        let baseURL = config.customDomain ?? "deeplinknow.com"
         let urlComponents = URLComponents {
             $0.scheme = "https"
-            $0.host = "api.deeplinknow.com"
-            $0.path = "/v1/\(endpoint)"
+            $0.host = baseURL
+            $0.path = "/api/v1/sdk/\(endpoint)"
         }
         
         guard let url = urlComponents.url else {
@@ -51,8 +127,8 @@ public final class DeepLinkNow {
         }
         
         var request = URLRequest(url: url)
-        request.setValue("Bearer \(shared.config.apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(config.apiKey, forHTTPHeaderField: "x-api-key")
         request.httpMethod = method
         
         if let body = body {
@@ -66,6 +142,18 @@ public final class DeepLinkNow {
         }
         
         return data
+    }
+    
+    public static func checkClipboard() -> String? {
+        guard let shared = shared else {
+            print("[DeepLinkNow] SDK not initialized. Call initialize() first")
+            return nil
+        }
+        
+        shared.log("Checking clipboard")
+        let content = UIPasteboard.general.string
+        shared.log("Clipboard content:", content ?? "nil")
+        return content
     }
     
     public typealias DeferredDeepLinkHandler = (URL?, DLNAttribution?) -> Void
@@ -148,13 +236,15 @@ public final class DeepLinkNow {
         return components.url
     }
     
-    public static func parseDeepLink(_ url: URL) -> (path: String, parameters: DLNCustomParameters)? {
-        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: true) else {
+    public static func parseDeepLink(_ url: URL) -> (path: String, parameters: [String: Any])? {
+        guard let shared = shared,
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: true),
+              shared.validDomains.contains(components.host ?? "") else {
             return nil
         }
         
         let path = components.path
-        var parameters = DLNCustomParameters()
+        var parameters: [String: Any] = [:]
         
         // Parse query parameters
         components.queryItems?.forEach { item in
@@ -167,7 +257,14 @@ public final class DeepLinkNow {
     }
 }
 
-// Helper extension
+// Helper extensions
+private extension Date {
+    func toISO8601String() -> String {
+        let formatter = ISO8601DateFormatter()
+        return formatter.string(from: self)
+    }
+}
+
 private extension URLComponents {
     init(_ configure: (inout URLComponents) -> Void) {
         self.init()
