@@ -3,136 +3,17 @@ import Foundation
 import CoreTelephony
 import AdSupport
 
-// Configuration
-public struct DLNConfig {
-    let apiKey: String
-    let enableLogs: Bool
-    
-    public init(apiKey: String, enableLogs: Bool = false) {
-        self.apiKey = apiKey
-        self.enableLogs = enableLogs
-    }
-}
-
-// Error types
-public enum DLNError: Error {
-    case invalidURL
-    case serverError
-    case notInitialized
-}
-
-// Attribution data
-public struct DLNAttribution: Codable {
-    public let campaign: String?
-    public let source: String?
-    public let medium: String?
-}
-
-// Custom parameters
-public struct DLNCustomParameters {
-    let dictionary: [String: Any]
-    
-    public init(_ parameters: [String: Any]) {
-        self.dictionary = parameters
-    }
-}
-
-// Fingerprint model for device information
-struct Fingerprint: Codable {
-    let userAgent: String
-    let platform: String
-    let osVersion: String
-    let deviceModel: String
-    let language: String
-    let timezone: String
-    let installedAt: String
-    let lastOpenedAt: String
-    let deviceId: String?
-    let advertisingId: String?
-    let vendorId: String?
-    let hardwareFingerprint: String?
-    
-    enum CodingKeys: String, CodingKey {
-        case userAgent = "user_agent"
-        case platform
-        case osVersion = "os_version"
-        case deviceModel = "device_model"
-        case language
-        case timezone
-        case installedAt = "installed_at"
-        case lastOpenedAt = "last_opened_at"
-        case deviceId = "device_id"
-        case advertisingId = "advertising_id"
-        case vendorId = "vendor_id"
-        case hardwareFingerprint = "hardware_fingerprint"
-    }
-}
-
-// Use the renamed types from Models.swift
-typealias DeeplinkMatch = DLNDeeplinkMatch
-typealias MatchResponse = DLNMatchResponse
-typealias InitResponse = DLNInitResponse
-typealias AnyCodable = DLNAnyCodable
-
-// DeferredDeepLinkResponse for checkDeferredDeepLink method
-struct DeferredDeepLinkResponse: Codable {
-    let deepLink: String?
-    let attribution: DLNAttribution?
-    
-    enum CodingKeys: String, CodingKey {
-        case deepLink = "deep_link"
-        case attribution
-    }
-}
-
-// DLNDeviceFingerprint for checkDeferredDeepLink method
-struct DLNDeviceFingerprint {
-    let deviceModel: String
-    let systemVersion: String
-    let screenResolution: String
-    let timezone: String
-    let language: String
-    let carrier: String?
-    let ipAddress: String?
-    let advertisingIdentifier: String?
-    
-    static func generate() -> DLNDeviceFingerprint {
-        let device = UIDevice.current
-        let screen = UIScreen.main
-        let screenSize = screen.bounds.size
-        let scale = screen.scale
-        let resolution = "\(Int(screenSize.width * scale))x\(Int(screenSize.height * scale))"
-        
-        var carrierName: String? = nil
-        if #available(iOS 12.0, *) {
-            let networkInfo = CTTelephonyNetworkInfo()
-            let carrier = networkInfo.serviceSubscriberCellularProviders?.values.first
-            carrierName = carrier?.carrierName
-        }
-        
-        return DLNDeviceFingerprint(
-            deviceModel: device.model,
-            systemVersion: device.systemVersion,
-            screenResolution: resolution,
-            timezone: TimeZone.current.identifier,
-            language: Locale.current.languageCode ?? "en",
-            carrier: carrierName,
-            ipAddress: nil,
-            advertisingIdentifier: ASIdentifierManager.shared().isAdvertisingTrackingEnabled ? 
-                ASIdentifierManager.shared().advertisingIdentifier.uuidString : nil
-        )
-    }
-}
-
 public final class DeepLinkNow {
     private static var shared: DeepLinkNow?
     private let config: DLNConfig
+    private let urlSession: URLSessionProtocol
     private let installTime: String
     private var initResponse: InitResponse?
     private var validDomains: Set<String> = ["deeplinknow.com", "deeplink.now"]
     
-    private init(config: DLNConfig) {
+    private init(config: DLNConfig, urlSession: URLSessionProtocol = URLSession.shared) {
         self.config = config
+        self.urlSession = urlSession
         self.installTime = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: "Z", with: "+00:00")
     }
     
@@ -146,11 +27,11 @@ public final class DeepLinkNow {
         print("[DeepLinkNow] Warning:", message)
     }
     
-    public static func initialize(apiKey: String, config: DLNConfig = DLNConfig(apiKey: "", enableLogs: false)) async {
+    public static func initialize(apiKey: String, config: DLNConfig = DLNConfig(apiKey: "", enableLogs: false), urlSession: URLSessionProtocol = URLSession.shared) async {
         let instance = DeepLinkNow(config: DLNConfig(
             apiKey: apiKey,
             enableLogs: config.enableLogs
-        ))
+        ), urlSession: urlSession)
         shared = instance
         
         instance.log("Initializing with config:", config)
@@ -250,7 +131,7 @@ public final class DeepLinkNow {
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
         }
         
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await urlSession.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse else {
             log("API request failed: Invalid response type")
             throw DLNError.serverError
@@ -377,20 +258,5 @@ public final class DeepLinkNow {
         }
         
         return (path, parameters)
-    }
-}
-
-// Helper extensions
-private extension Date {
-    func toISO8601String() -> String {
-        let formatter = ISO8601DateFormatter()
-        return formatter.string(from: self)
-    }
-}
-
-private extension URLComponents {
-    init(_ configure: (inout URLComponents) -> Void) {
-        self.init()
-        configure(&self)
     }
 } 
