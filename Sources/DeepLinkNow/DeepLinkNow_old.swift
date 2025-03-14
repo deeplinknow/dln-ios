@@ -68,11 +68,141 @@ struct Fingerprint: Codable {
     }
 }
 
-// Use the renamed types from Models.swift
-typealias DeeplinkMatch = DLNDeeplinkMatch
-typealias MatchResponse = DLNMatchResponse
-typealias InitResponse = DLNInitResponse
-typealias AnyCodable = DLNAnyCodable
+struct DeeplinkMatch: Codable {
+    let id: String
+    let targetUrl: String
+    let metadata: [String: AnyCodable]
+    let campaignId: String?
+    let matchedAt: String
+    let expiresAt: String
+    
+    enum CodingKeys: String, CodingKey {
+        case id
+        case targetUrl = "target_url"
+        case metadata
+        case campaignId = "campaign_id"
+        case matchedAt = "matched_at"
+        case expiresAt = "expires_at"
+    }
+}
+
+struct MatchResponse: Codable {
+    let match: Match
+    
+    struct Match: Codable {
+        let deeplink: DeeplinkMatch?
+        let confidenceScore: Double
+        let ttlSeconds: Int
+        
+        enum CodingKeys: String, CodingKey {
+            case deeplink
+            case confidenceScore = "confidence_score"
+            case ttlSeconds = "ttl_seconds"
+        }
+    }
+}
+
+struct InitResponse: Codable {
+    let app: App
+    let account: Account
+    
+    struct App: Codable {
+        let id: String
+        let name: String
+        let timezone: String
+        let androidPackageName: String?
+        let androidSha256Cert: String?
+        let iosBundleId: String?
+        let iosAppStoreId: String?
+        let iosAppPrefix: String?
+        let customDomains: [CustomDomain]
+        
+        enum CodingKeys: String, CodingKey {
+            case id, name, timezone
+            case androidPackageName = "android_package_name"
+            case androidSha256Cert = "android_sha256_cert"
+            case iosBundleId = "ios_bundle_id"
+            case iosAppStoreId = "ios_app_store_id"
+            case iosAppPrefix = "ios_app_prefix"
+            case customDomains = "custom_domains"
+        }
+        
+        struct CustomDomain: Codable {
+            let domain: String?
+            let verified: Bool?
+        }
+    }
+    
+    struct Account: Codable {
+        let status: String
+        let creditsRemaining: Int
+        let rateLimits: RateLimits
+        
+        enum CodingKeys: String, CodingKey {
+            case status
+            case creditsRemaining = "credits_remaining"
+            case rateLimits = "rate_limits"
+        }
+        
+        struct RateLimits: Codable {
+            let matchesPerSecond: Int
+            let matchesPerDay: Int
+            
+            enum CodingKeys: String, CodingKey {
+                case matchesPerSecond = "matches_per_second"
+                case matchesPerDay = "matches_per_day"
+            }
+        }
+    }
+}
+
+// Helper for handling dynamic JSON values
+struct AnyCodable: Codable {
+    let value: Any
+    
+    init(_ value: Any) {
+        self.value = value
+    }
+    
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let value = try? container.decode(String.self) {
+            self.value = value
+        } else if let value = try? container.decode(Int.self) {
+            self.value = value
+        } else if let value = try? container.decode(Double.self) {
+            self.value = value
+        } else if let value = try? container.decode(Bool.self) {
+            self.value = value
+        } else if let value = try? container.decode([String: AnyCodable].self) {
+            self.value = value
+        } else if let value = try? container.decode([AnyCodable].self) {
+            self.value = value
+        } else {
+            self.value = NSNull()
+        }
+    }
+    
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch value {
+        case let value as String:
+            try container.encode(value)
+        case let value as Int:
+            try container.encode(value)
+        case let value as Double:
+            try container.encode(value)
+        case let value as Bool:
+            try container.encode(value)
+        case let value as [String: AnyCodable]:
+            try container.encode(value)
+        case let value as [AnyCodable]:
+            try container.encode(value)
+        default:
+            try container.encodeNil()
+        }
+    }
+}
 
 // DeferredDeepLinkResponse for checkDeferredDeepLink method
 struct DeferredDeepLinkResponse: Codable {

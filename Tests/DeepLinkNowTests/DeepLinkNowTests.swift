@@ -2,77 +2,162 @@ import XCTest
 @testable import DeepLinkNow
 
 final class DeepLinkNowTests: XCTestCase {
+    var mockURLSession: MockURLSession!
+    let testApiKey = "test_api_key"
+    
     override func setUp() {
         super.setUp()
-        // Reset shared instance before each test
-        DeepLinkNow.initialize(apiKey: "test-api-key")
+        mockURLSession = MockURLSession()
+        URLProtocol.registerClass(MockURLProtocol.self)
     }
     
     override func tearDown() {
+        mockURLSession = nil
+        URLProtocol.unregisterClass(MockURLProtocol.self)
         super.tearDown()
     }
     
-    func testInitialization() {
-        // Test initialization with valid API key
-        DeepLinkNow.initialize(apiKey: "valid-api-key")
-        XCTAssertNotNil(DeepLinkNow.checkClipboard())
-        
-        // Test initialization with empty API key
-        DeepLinkNow.initialize(apiKey: "")
-        XCTAssertNotNil(DeepLinkNow.checkClipboard())
-    }
+    // MARK: - Initialization Tests
     
-    func testClipboardAccess() {
-        // Set up test data in clipboard
-        UIPasteboard.general.string = "deeplinknow://test/path"
-        
-        // Test clipboard reading
-        let clipboardContent = DeepLinkNow.checkClipboard()
-        XCTAssertNotNil(clipboardContent)
-        XCTAssertEqual(clipboardContent, "deeplinknow://test/path")
-        
-        // Test empty clipboard
-        UIPasteboard.general.string = ""
-        XCTAssertEqual(DeepLinkNow.checkClipboard(), "")
-        
-        // Test nil clipboard
-        UIPasteboard.general.string = nil
-        XCTAssertNil(DeepLinkNow.checkClipboard())
-    }
-    
-    func testAPIRequestFormatting() async {
-        let config = DLNConfig(apiKey: "test-api-key")
-        let dln = DeepLinkNow(config: config)
-        
-        do {
-            // Test valid endpoint
-            _ = try await dln.makeAPIRequest(endpoint: "test")
-            
-            // This will likely fail in real testing since we're not mocking the network call
-            // You should mock the URLSession for proper testing
-        } catch {
-            XCTAssertTrue(error is DLNError)
+    func testInitialization() async throws {
+        // Setup mock response
+        let mockResponse = """
+        {
+            "app": {
+                "id": "test_app_id",
+                "name": "Test App",
+                "timezone": "UTC",
+                "android_package_name": null,
+                "android_sha256_cert": null,
+                "ios_bundle_id": "com.test.app",
+                "ios_app_store_id": "123456789",
+                "ios_app_prefix": "test",
+                "custom_domains": [
+                    {
+                        "domain": "test.com",
+                        "verified": true
+                    }
+                ]
+            },
+            "account": {
+                "status": "active",
+                "credits_remaining": 1000,
+                "rate_limits": {
+                    "matches_per_second": 10,
+                    "matches_per_day": 1000
+                }
+            }
         }
+        """
+        MockURLProtocol.mockData = mockResponse.data(using: .utf8)
+        MockURLProtocol.mockResponse = HTTPURLResponse(
+            url: URL(string: "https://deeplinknow.com/api/v1/sdk/init")!,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: nil
+        )
+        
+        // Test initialization
+        await DeepLinkNow.initialize(apiKey: testApiKey)
+        
+        // Verify domain was added
+        XCTAssertTrue(DeepLinkNow.isValidDomain("test.com"))
     }
     
-    func testErrorHandling() async {
-        let config = DLNConfig(apiKey: "test-api-key")
-        let dln = DeepLinkNow(config: config)
+    // MARK: - Fingerprint Tests
+    
+    func testFingerprintGeneration() async {
+        await DeepLinkNow.initialize(apiKey: testApiKey)
         
-        do {
-            // Test invalid URL
-            _ = try await dln.makeAPIRequest(endpoint: "")
-            XCTFail("Should throw invalid URL error")
-        } catch {
-            XCTAssertEqual(error as? DLNError, .invalidURL)
+        let fingerprint = await DeepLinkNow.findDeferredUser()?.match.fingerprint
+        
+        XCTAssertNotNil(fingerprint)
+        XCTAssertTrue(fingerprint?.userAgent.contains("DLN-iOS/"))
+        XCTAssertEqual(fingerprint?.platform, "ios")
+        XCTAssertNotNil(fingerprint?.installedAt)
+        XCTAssertNotNil(fingerprint?.lastOpenedAt)
+        
+        // Verify ISO8601 format with +00:00
+        XCTAssertTrue(fingerprint?.installedAt.hasSuffix("+00:00") ?? false)
+        XCTAssertTrue(fingerprint?.lastOpenedAt.hasSuffix("+00:00") ?? false)
+    }
+    
+    // MARK: - Deep Link Tests
+    
+    func testValidDomainCheck() async {
+        await DeepLinkNow.initialize(apiKey: testApiKey)
+        
+        XCTAssertTrue(DeepLinkNow.isValidDomain("deeplinknow.com"))
+        XCTAssertTrue(DeepLinkNow.isValidDomain("deeplink.now"))
+        XCTAssertFalse(DeepLinkNow.isValidDomain("invalid.com"))
+    }
+    
+    func testDeepLinkParsing() async {
+        await DeepLinkNow.initialize(apiKey: testApiKey)
+        
+        let url = "https://deeplinknow.com/test/path?param1=value1&param2=value2"
+        let result = DeepLinkNow.parseDeepLink(URL(string: url)!)
+        
+        XCTAssertNotNil(result)
+        XCTAssertEqual(result?.path, "/test/path")
+        XCTAssertEqual(result?.parameters["param1"], "value1")
+        XCTAssertEqual(result?.parameters["param2"], "value2")
+    }
+    
+    // MARK: - Match Response Tests
+    
+    func testFindDeferredUser() async {
+        // Setup mock response
+        let mockResponse = """
+        {
+            "match": {
+                "deeplink": {
+                    "id": "test_id",
+                    "target_url": "https://example.com",
+                    "metadata": {
+                        "campaign": "test_campaign"
+                    },
+                    "campaign_id": "campaign_123",
+                    "matched_at": "2024-01-01T00:00:00+00:00",
+                    "expires_at": "2024-01-02T00:00:00+00:00"
+                },
+                "confidence_score": 0.95,
+                "ttl_seconds": 86400
+            }
         }
+        """
+        MockURLProtocol.mockData = mockResponse.data(using: .utf8)
+        MockURLProtocol.mockResponse = HTTPURLResponse(
+            url: URL(string: "https://deeplinknow.com/api/v1/sdk/match")!,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: nil
+        )
+        
+        let result = await DeepLinkNow.findDeferredUser()
+        
+        XCTAssertNotNil(result)
+        XCTAssertEqual(result?.match.deeplink?.id, "test_id")
+        XCTAssertEqual(result?.match.deeplink?.targetUrl, "https://example.com")
+        XCTAssertEqual(result?.match.confidenceScore, 0.95)
+        XCTAssertEqual(result?.match.ttlSeconds, 86400)
     }
 }
 
-// MARK: - Network Mocking Helper
+// MARK: - Mock Classes
+
+class MockURLSession: URLSession {
+    override func data(
+        for request: URLRequest
+    ) async throws -> (Data, URLResponse) {
+        return (Data(), URLResponse())
+    }
+}
 
 class MockURLProtocol: URLProtocol {
-    static var requestHandler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+    static var mockData: Data?
+    static var mockResponse: URLResponse?
+    static var mockError: Error?
     
     override class func canInit(with request: URLRequest) -> Bool {
         return true
@@ -83,52 +168,21 @@ class MockURLProtocol: URLProtocol {
     }
     
     override func startLoading() {
-        guard let handler = MockURLProtocol.requestHandler else {
-            XCTFail("Handler is unavailable.")
+        if let error = MockURLProtocol.mockError {
+            client?.urlProtocol(self, didFailWithError: error)
             return
         }
         
-        do {
-            let (response, data) = try handler(request)
+        if let response = MockURLProtocol.mockResponse {
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(self, didLoad: data)
-            client?.urlProtocolDidFinishLoading(self)
-        } catch {
-            client?.urlProtocol(self, didFailWithError: error)
         }
+        
+        if let data = MockURLProtocol.mockData {
+            client?.urlProtocol(self, didLoad: data)
+        }
+        
+        client?.urlProtocolDidFinishLoading(self)
     }
     
     override func stopLoading() {}
-}
-
-// MARK: - Network Testing Extension
-
-extension DeepLinkNowTests {
-    func testNetworkRequest() async {
-        // Create a mock URL session configuration
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [MockURLProtocol.self]
-        
-        // Set up the mock request handler
-        let expectedData = "Response".data(using: .utf8)!
-        MockURLProtocol.requestHandler = { request in
-            let response = HTTPURLResponse(
-                url: request.url!,
-                statusCode: 200,
-                httpVersion: nil,
-                headerFields: nil
-            )!
-            return (response, expectedData)
-        }
-        
-        // Test the request
-        let dln = DeepLinkNow(config: DLNConfig(apiKey: "test-api-key"))
-        
-        do {
-            let data = try await dln.makeAPIRequest(endpoint: "test")
-            XCTAssertEqual(data, expectedData)
-        } catch {
-            XCTFail("Network request failed: \(error)")
-        }
-    }
 }
