@@ -16,7 +16,7 @@ Pod::Spec.new do |s|
   #
 
   s.name             = 'DeepLinkNow'
-  s.version          = '0.2.3'
+  s.version          = '0.2.4'
   s.summary          = 'DeepLinkNow iOS SDK for deep linking and attribution'
 
   # This description is used to generate tags and improve search results.
@@ -165,4 +165,7 @@ Pod::Spec.new do |s|
     'SWIFT_INCLUDE_PATHS' => '$(PODS_TARGET_SRCROOT)/Sources',
     'OTHER_LDFLAGS' => '-framework CoreTelephony -framework AdSupport'
   }
+
+  # Preserve example project files
+  s.preserve_paths = 'Example/*'
 end
