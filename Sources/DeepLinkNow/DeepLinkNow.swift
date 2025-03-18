@@ -36,8 +36,8 @@ public final class DeepLinkNow {
         do {
             let data = try await instance.makeAPIRequest(
                 endpoint: "init",
-                method: "POST",
-                body: ["api_key": config.apiKey]
+                method: "GET",
+                body: nil
             )
             
             let decoder = JSONDecoder()
@@ -67,7 +67,11 @@ public final class DeepLinkNow {
     
     private func getFingerprint() -> Fingerprint {
         let device = UIDevice.current
-        let currentTime = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: "Z", with: "+00:00")
+        let dateFormatter = ISO8601DateFormatter()
+        dateFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        
+        let currentTime = dateFormatter.string(from: Date())
+        let installTime = dateFormatter.string(from: Date().addingTimeInterval(-300)) // 5 minutes ago for testing
         
         return Fingerprint(
             userAgent: "DLN-iOS/\(device.systemVersion)",
@@ -80,8 +84,8 @@ public final class DeepLinkNow {
             lastOpenedAt: currentTime,
             deviceId: UIDevice.current.identifierForVendor?.uuidString,
             advertisingId: ASIdentifierManager.shared().advertisingIdentifier.uuidString,
-            vendorId: nil,
-            hardwareFingerprint: nil
+            vendorId: UIDevice.current.identifierForVendor?.uuidString ?? "test-vendor-id",
+            hardwareFingerprint: UIDevice.current.identifierForVendor?.uuidString ?? "test-hardware-fingerprint"
         )
     }
     
@@ -94,7 +98,24 @@ public final class DeepLinkNow {
         shared.log("Finding deferred user...")
         
         let fingerprint = shared.getFingerprint()
-        let matchRequest = ["fingerprint": fingerprint]
+        
+        // Convert fingerprint to dictionary format
+        let fingerprintDict: [String: Any] = [
+            "user_agent": fingerprint.userAgent,
+            "platform": fingerprint.platform,
+            "os_version": fingerprint.osVersion,
+            "device_model": fingerprint.deviceModel,
+            "language": fingerprint.language,
+            "timezone": fingerprint.timezone,
+            "installed_at": fingerprint.installedAt,
+            "last_opened_at": fingerprint.lastOpenedAt,
+            "device_id": fingerprint.deviceId as Any,
+            "advertising_id": fingerprint.advertisingId as Any,
+            "vendor_id": fingerprint.vendorId as Any,
+            "hardware_fingerprint": fingerprint.hardwareFingerprint as Any
+        ]
+        
+        let matchRequest = ["fingerprint": fingerprintDict]
         
         shared.log("Sending match request:", matchRequest)
         
@@ -102,7 +123,7 @@ public final class DeepLinkNow {
             let data = try await shared.makeAPIRequest(
                 endpoint: "match",
                 method: "POST",
-                body: try JSONSerialization.jsonObject(with: JSONEncoder().encode(matchRequest)) as? [String: Any]
+                body: matchRequest
             )
             
             let decoder = JSONDecoder()
@@ -117,12 +138,17 @@ public final class DeepLinkNow {
     }
     
     private func makeAPIRequest(endpoint: String, method: String = "GET", body: [String: Any]? = nil) async throws -> Data {
-        let url = URL(string: "https://deeplinknow.com/api/v1/sdk/\(endpoint)")!
+        let baseUrl = config.baseUrl ?? "https://deeplinknow.com"
+        let url = URL(string: "\(baseUrl)/api/v1/sdk/\(endpoint)")!
         
         var request = URLRequest(url: url)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(config.apiKey, forHTTPHeaderField: "x-api-key")
         request.httpMethod = method
+        
+        if let timeout = config.timeout {
+            request.timeoutInterval = timeout
+        }
         
         if let body = body {
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -131,15 +157,34 @@ public final class DeepLinkNow {
         let (data, response) = try await urlSession.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse else {
             log("API request failed: Invalid response type")
-            throw DLNError.serverError
+            throw DLNError.serverError("Invalid response type", nil, nil)
         }
         
         if !(200...299).contains(httpResponse.statusCode) {
             log("API request failed: \(httpResponse.statusCode)")
             if let errorString = String(data: data, encoding: .utf8) {
                 log("Error response: \(errorString)")
+                
+                // Try to decode error response
+                if let errorResponse = try? JSONDecoder().decode([String: String].self, from: data) {
+                    throw DLNError.serverError(
+                        errorResponse["error"] ?? "Unknown error",
+                        errorResponse["status"],
+                        errorResponse["details"]
+                    )
+                }
             }
-            throw DLNError.serverError
+            
+            // Map status codes to specific errors
+            switch httpResponse.statusCode {
+            case 400: throw DLNError.badRequest
+            case 401: throw DLNError.unauthorized
+            case 403: throw DLNError.forbidden
+            case 404: throw DLNError.notFound
+            case 429: throw DLNError.tooManyRequests
+            case 500: throw DLNError.internalServerError
+            default: throw DLNError.serverError("Unknown error", String(httpResponse.statusCode), nil)
+            }
         }
         
         return data

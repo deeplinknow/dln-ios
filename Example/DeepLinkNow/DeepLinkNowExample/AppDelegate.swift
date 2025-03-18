@@ -7,15 +7,19 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         // Create and set up window
-        window = UIWindow(frame: UIScreen.main.bounds)
+        let window = UIWindow(frame: UIScreen.main.bounds)
+        self.window = window
+        
         let viewController = ViewController()
-        window?.rootViewController = viewController
-        window?.makeKeyAndVisible()
+        let navigationController = UINavigationController(rootViewController: viewController)
+        window.rootViewController = navigationController
+        window.backgroundColor = .white
+        window.makeKeyAndVisible()
         
         // Initialize SDK
         Task {
             let config = DLNConfig(apiKey: "test-api-key", enableLogs: true)
-            await DeepLinkNow.initialize(apiKey: <#String#>, config: config)
+            await DeepLinkNow.initialize(config: config)
             
             // Check for deferred deep links
             if let response = await DeepLinkNow.findDeferredUser(),
