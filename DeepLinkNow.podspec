@@ -16,7 +16,7 @@ Pod::Spec.new do |s|
   #
 
   s.name             = 'DeepLinkNow'
-  s.version          = '0.2.5'
+  s.version          = '0.2.6'
   s.summary          = 'DeepLinkNow iOS SDK for deep linking and attribution'
 
   # This description is used to generate tags and improve search results.
@@ -79,6 +79,7 @@ Pod::Spec.new do |s|
   s.ios.deployment_target = '13.0'
   s.swift_version = '5.0'
 
+  s.preserve_paths = 'Sources/**/*'
 
   # ――― Source Location ―――――――――――――――――――――――――――――――――――――――――――――――――――――――――― #
   #
