@@ -27,11 +27,8 @@ public final class DeepLinkNow {
         print("[DeepLinkNow] Warning:", message)
     }
     
-    public static func initialize(apiKey: String, config: DLNConfig = DLNConfig(apiKey: "", enableLogs: false), urlSession: URLSessionProtocol = URLSession.shared) async {
-        let instance = DeepLinkNow(config: DLNConfig(
-            apiKey: apiKey,
-            enableLogs: config.enableLogs
-        ), urlSession: urlSession)
+    public static func init(config: DLNConfig, urlSession: URLSessionProtocol = URLSession.shared) async {
+        let instance = DeepLinkNow(config: config, urlSession: urlSession)
         shared = instance
         
         instance.log("Initializing with config:", config)
@@ -40,7 +37,7 @@ public final class DeepLinkNow {
             let data = try await instance.makeAPIRequest(
                 endpoint: "init",
                 method: "POST",
-                body: ["api_key": apiKey]
+                body: ["api_key": config.apiKey]
             )
             
             let decoder = JSONDecoder()
@@ -186,7 +183,7 @@ public final class DeepLinkNow {
             ]
         ]
         
-        Task {
+        Task { @Sendable in
             do {
                 let data = try await shared!.makeAPIRequest(
                     endpoint: "deferred_deeplink",

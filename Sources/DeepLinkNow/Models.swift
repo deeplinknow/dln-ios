@@ -22,7 +22,7 @@ public enum DLNError: Error {
 }
 
 // Attribution data
-public struct DLNAttribution: Codable {
+public struct DLNAttribution: Codable, Sendable {
     public let campaign: String?
     public let source: String?
     public let medium: String?
@@ -38,7 +38,7 @@ public struct DLNCustomParameters {
 }
 
 // DeferredDeepLinkResponse for checkDeferredDeepLink method
-public struct DeferredDeepLinkResponse: Codable {
+public struct DeferredDeepLinkResponse: Codable, Sendable {
     let deepLink: String?
     let attribution: DLNAttribution?
     

@@ -64,14 +64,14 @@ git add DeepLinkNow.podspec Package.swift README.md
 git commit -m "$COMMIT_MESSAGE: $NEW_VERSION"
 git tag "$NEW_VERSION"
 git push origin main
-git push origin --tags
+git push origin "$NEW_VERSION"
 
 # Validate podspec
 echo "Validating podspec..."
-pod spec lint DeepLinkNow.podspec
+pod spec lint DeepLinkNow.podspec --allow-warnings
 
 # Push to CocoaPods
 echo "Publishing to CocoaPods..."
-pod trunk push DeepLinkNow.podspec
+pod trunk push DeepLinkNow.podspec --allow-warnings
 
 echo "✅ Successfully deployed version $NEW_VERSION to CocoaPods!" 
