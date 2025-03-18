@@ -27,7 +27,7 @@ public final class DeepLinkNow {
         print("[DeepLinkNow] Warning:", message)
     }
     
-    public static func init(config: DLNConfig, urlSession: URLSessionProtocol = URLSession.shared) async {
+    public static func initialize(config: DLNConfig, urlSession: URLSessionProtocol = URLSession.shared) async {
         let instance = DeepLinkNow(config: config, urlSession: urlSession)
         shared = instance
         
