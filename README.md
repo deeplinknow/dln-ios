@@ -33,26 +33,66 @@ pod install
 ```swift
 // In your AppDelegate or initialization code
 Task {
-    await DeepLinkNow.initialize(apiKey: "your-api-key", config: [
-        "enableLogs": true  // Optional: Enable debug logging
-    ])
+    // Basic initialization
+    let config = DLNConfig(
+        apiKey: "your-api-key",
+        enableLogs: true,  // Optional: Enable debug logging
+        baseUrl: nil,      // Optional: Custom API endpoint
+        timeout: nil,      // Optional: Custom timeout
+        retryAttempts: nil // Optional: Number of retry attempts
+    )
+    await DeepLinkNow.initialize(config: config)
 }
 ```
 
 ### Find Deferred User
 
+The SDK provides a powerful deferred deep linking system that can match users across installations:
+
 ```swift
 Task {
     if let match = await DeepLinkNow.findDeferredUser() {
-        if let deepLink = match.deepLink {
-            // Handle the deep link
-            print("Found deep link:", deepLink)
+        if let deepLink = match.match.deeplink {
+            // Access deep link properties
+            print("Deep Link ID:", deepLink.id)
+            print("Target URL:", deepLink.targetUrl)
+            print("Campaign ID:", deepLink.campaignId ?? "None")
+            print("Metadata:", deepLink.metadata)
+            print("Matched At:", deepLink.matchedAt)
+            print("Expires At:", deepLink.expiresAt)
         }
+
+        // Access match confidence and TTL
+        print("Confidence Score:", match.match.confidenceScore)
+        print("TTL Seconds:", match.match.ttlSeconds)
+
+        // Access attribution data if available
         if let attribution = match.attribution {
-            // Handle attribution data
-            print("Attribution:", attribution)
+            print("Campaign:", attribution.campaign ?? "None")
+            print("Source:", attribution.source ?? "None")
+            print("Medium:", attribution.medium ?? "None")
         }
     }
+}
+```
+
+### Create Deep Links
+
+```swift
+// Create deep link with custom parameters
+let customParams = DLNCustomParameters([
+    "referrer": "social_share",
+    "campaign": "summer_sale",
+    "is_promo": true,
+    "discount": 20
+])
+
+if let url = DeepLinkNow.createDeepLink(
+    path: "/product/123",
+    customParameters: customParams
+) {
+    // Use the generated deep link
+    print("Generated URL:", url)
 }
 ```
 
@@ -60,9 +100,32 @@ Task {
 
 ```swift
 if let (path, parameters) = DeepLinkNow.parseDeepLink(url) {
-    // Handle the deep link
+    // Handle the deep link components
     print("Path:", path)
     print("Parameters:", parameters)
+}
+```
+
+### Handle Universal Links
+
+Add this to your `AppDelegate`:
+
+```swift
+func application(_ application: UIApplication, continue userActivity: NSUserActivity, restorationHandler: @escaping ([UIUserActivityRestoring]?) -> Void) -> Bool {
+    if userActivity.activityType == NSUserActivityTypeBrowsingWeb,
+       let url = userActivity.webpageURL {
+        handleDeepLink(url)
+        return true
+    }
+    return false
+}
+
+private func handleDeepLink(_ url: URL) {
+    if let (path, parameters) = DeepLinkNow.parseDeepLink(url) {
+        // Handle the deep link
+        print("Path:", path)
+        print("Parameters:", parameters)
+    }
 }
 ```
 
@@ -73,6 +136,17 @@ The SDK automatically validates deep links against:
 - deeplinknow.com
 - deeplink.now
 - Your app's verified custom domains (configured in the dashboard)
+
+These domains are automatically loaded during SDK initialization.
+
+### Rate Limits and Account Status
+
+The SDK includes built-in rate limiting and account status monitoring:
+
+- Matches per second limit
+- Matches per day limit
+- Account status tracking (active/suspended/expired)
+- Remaining credits monitoring
 
 ## Documentation
 
