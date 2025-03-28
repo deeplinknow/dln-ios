@@ -96,30 +96,42 @@ final class DeepLinkNowTests: XCTestCase {
         
         await DeepLinkNow.initialize(apiKey: testApiKey, urlSession: mockURLSession)
         
-        // Setup mock response for findDeferredUser
+        // Setup mock response for findDeferredUser with expected device model
         let matchMockResponse = """
         {
-            "match": {
-                "deeplink": null,
+            "matches": [{
                 "confidence_score": 0.0,
-                "ttl_seconds": 0,
-                "fingerprint": {
-                    "user_agent": "DLN-iOS/16.0",
-                    "platform": "ios",
-                    "os_version": "16.0",
-                    "device_model": "iPhone",
-                    "language": "en",
-                    "timezone": "America/Los_Angeles",
-                    "installed_at": "2023-01-01T00:00:00+00:00",
-                    "last_opened_at": "2023-01-01T00:00:00+00:00",
-                    "device_id": "test-device-id",
-                    "advertising_id": "test-ad-id",
-                    "vendor_id": null,
-                    "hardware_fingerprint": null
-                }
-            },
-            "deep_link": null,
-            "attribution": null
+                "match_details": {
+                    "ip_match": {
+                        "matched": false,
+                        "score": 0.0
+                    },
+                    "device_match": {
+                        "matched": true,
+                        "score": 1.0,
+                        "components": {
+                            "platform": true,
+                            "os_version": true,
+                            "device_model": true,
+                            "hardware_fingerprint": false
+                        }
+                    },
+                    "time_proximity": {
+                        "score": 0.0,
+                        "time_difference_minutes": 0
+                    },
+                    "locale_match": {
+                        "matched": true,
+                        "score": 1.0,
+                        "components": {
+                            "language": true,
+                            "timezone": true
+                        }
+                    }
+                },
+                "deeplink": null
+            }],
+            "ttl_seconds": 0
         }
         """
         MockURLProtocol.mockData = matchMockResponse.data(using: .utf8)
@@ -132,14 +144,12 @@ final class DeepLinkNowTests: XCTestCase {
         
         let result = await DeepLinkNow.findDeferredUser()
         
-        // Test the fingerprint properties directly from the JSON response
+        // Test the response
         XCTAssertNotNil(result)
-        
-        // Since MatchResponse.Match doesn't have a fingerprint property in your model,
-        // we need to modify our test to check other properties instead
-        XCTAssertEqual(result?.match.confidenceScore, 0.0)
-        XCTAssertEqual(result?.match.ttlSeconds, 0)
-        XCTAssertNil(result?.match.deeplink)
+        XCTAssertEqual(result?.matches.count, 1)
+        XCTAssertEqual(result?.matches[0].confidenceScore, 0.0)
+        XCTAssertTrue(result?.matches[0].matchDetails.deviceMatch.matched ?? false)
+        XCTAssertNil(result?.matches[0].deeplink)
     }
     
     // MARK: - Deep Link Tests

@@ -52,7 +52,7 @@ public enum DLNError: Error {
 }
 
 // Attribution data
-public struct DLNAttribution: Codable {
+public struct DLNAttribution: Codable, Sendable {
     public let campaign: String?
     public let source: String?
     public let medium: String?
@@ -65,11 +65,15 @@ public struct DLNAttribution: Codable {
 }
 
 // Custom parameters
-public struct DLNCustomParameters {
-    let dictionary: [String: Any]
+@frozen public struct DLNCustomParameters: Sendable {
+    let dictionary: [String: String]
+    
+    public init(_ parameters: [String: String]) {
+        self.dictionary = parameters
+    }
     
     public init(_ parameters: [String: Any]) {
-        self.dictionary = parameters
+        self.dictionary = parameters.mapValues { String(describing: $0) }
     }
 }
 
@@ -204,32 +208,33 @@ public struct DeepLink: Codable {
     }
 }
 
-public struct Match: Codable {
-    public let deeplink: DeepLink?
-    public let confidenceScore: Double
-    public let ttlSeconds: Int
-    
-    enum CodingKeys: String, CodingKey {
-        case deeplink
-        case confidenceScore = "confidence_score"
-        case ttlSeconds = "ttl_seconds"
-    }
-}
-
-public struct MatchResponse: Codable {
-    public let match: Match
-    public let deepLink: String?
-    public let attribution: DLNAttribution?
-    
-    enum CodingKeys: String, CodingKey {
-        case match
-        case deepLink = "deep_link"
-        case attribution
-    }
-}
-
 // Fingerprint Types
+public struct FingerprintMetadata: Codable {
+    let screenWidth: Int?
+    let screenHeight: Int?
+    let pixelRatio: Double?
+    let colorDepth: Int?
+    let isTablet: Bool?
+    let connectionType: String?
+    let cpuCores: Int?
+    let deviceMemory: Int?
+    let source: String
+    
+    enum CodingKeys: String, CodingKey {
+        case screenWidth = "screen_width"
+        case screenHeight = "screen_height"
+        case pixelRatio = "pixel_ratio"
+        case colorDepth = "color_depth"
+        case isTablet = "is_tablet"
+        case connectionType = "connection_type"
+        case cpuCores = "cpu_cores"
+        case deviceMemory = "device_memory"
+        case source
+    }
+}
+
 public struct Fingerprint: Codable {
+    let ipAddress: String
     let userAgent: String
     let platform: String
     let osVersion: String
@@ -242,8 +247,10 @@ public struct Fingerprint: Codable {
     let advertisingId: String?
     let vendorId: String?
     let hardwareFingerprint: String?
+    let metadata: FingerprintMetadata?
     
     enum CodingKeys: String, CodingKey {
+        case ipAddress = "ip_address"
         case userAgent = "user_agent"
         case platform
         case osVersion = "os_version"
@@ -256,63 +263,154 @@ public struct Fingerprint: Codable {
         case advertisingId = "advertising_id"
         case vendorId = "vendor_id"
         case hardwareFingerprint = "hardware_fingerprint"
+        case metadata
     }
 }
 
-public struct FingerprintResponse: Codable {
-    let fingerprint: ExtendedFingerprint
-}
-
-public struct ExtendedFingerprint: Codable {
-    // Base Fingerprint properties
-    let userAgent: String
+public struct FingerprintMatch: Codable {
+    let ipAddress: String
     let platform: String
     let osVersion: String
     let deviceModel: String
     let language: String
     let timezone: String
-    let installedAt: String
-    let lastOpenedAt: String
-    let deviceId: String?
-    let advertisingId: String?
-    let vendorId: String?
-    let hardwareFingerprint: String?
-    
-    // Additional properties for response
-    let id: String
     let createdAt: String
     let expiresAt: String
+    let deviceId: String?
+    let advertisingId: String?
+    let vendorId: String?
+    let hardwareFingerprint: String?
+    let metadata: [String: AnyCodable]?
     
     enum CodingKeys: String, CodingKey {
-        case userAgent = "user_agent"
+        case ipAddress = "ip_address"
         case platform
         case osVersion = "os_version"
         case deviceModel = "device_model"
         case language
         case timezone
-        case installedAt = "installed_at"
-        case lastOpenedAt = "last_opened_at"
+        case createdAt = "created_at"
+        case expiresAt = "expires_at"
         case deviceId = "device_id"
         case advertisingId = "advertising_id"
         case vendorId = "vendor_id"
         case hardwareFingerprint = "hardware_fingerprint"
+        case metadata
+    }
+}
+
+public struct MatchComponentDetails: Codable {
+    let matched: Bool
+    let score: Double
+}
+
+public struct DeviceMatchDetails: Codable {
+    let matched: Bool
+    let score: Double
+    let components: DeviceMatchComponents
+    
+    struct DeviceMatchComponents: Codable {
+        let platform: Bool
+        let osVersion: Bool
+        let deviceModel: Bool
+        let hardwareFingerprint: Bool
+        
+        enum CodingKeys: String, CodingKey {
+            case platform
+            case osVersion = "os_version"
+            case deviceModel = "device_model"
+            case hardwareFingerprint = "hardware_fingerprint"
+        }
+    }
+}
+
+public struct LocaleMatchDetails: Codable {
+    let matched: Bool
+    let score: Double
+    let components: LocaleMatchComponents
+    
+    struct LocaleMatchComponents: Codable {
+        let language: Bool
+        let timezone: Bool
+    }
+}
+
+public struct TimeProximityDetails: Codable {
+    let score: Double
+    let timeDifferenceMinutes: Int
+    
+    enum CodingKeys: String, CodingKey {
+        case score
+        case timeDifferenceMinutes = "time_difference_minutes"
+    }
+}
+
+public struct MatchDetails: Codable {
+    let ipMatch: MatchComponentDetails
+    let deviceMatch: DeviceMatchDetails
+    let timeProximity: TimeProximityDetails
+    let localeMatch: LocaleMatchDetails
+    
+    enum CodingKeys: String, CodingKey {
+        case ipMatch = "ip_match"
+        case deviceMatch = "device_match"
+        case timeProximity = "time_proximity"
+        case localeMatch = "locale_match"
+    }
+}
+
+public struct DeeplinkMatch: Codable {
+    public let id: String
+    public let targetUrl: String
+    public let metadata: [String: AnyCodable]
+    public let campaignId: String?
+    public let matchedAt: String
+    public let expiresAt: String
+    
+    enum CodingKeys: String, CodingKey {
         case id
-        case createdAt = "created_at"
+        case targetUrl = "target_url"
+        case metadata
+        case campaignId = "campaign_id"
+        case matchedAt = "matched_at"
         case expiresAt = "expires_at"
     }
 }
 
-// Unfurl Types
-public struct UnfurlMetadata: Codable {
-    let title: String
-    let description: String
-    let image: String
-    let type: String
+public struct Match: Codable {
+    public let confidenceScore: Double
+    public let matchDetails: MatchDetails
+    public let deeplink: DeeplinkMatch?
+    
+    enum CodingKeys: String, CodingKey {
+        case confidenceScore = "confidence_score"
+        case matchDetails = "match_details"
+        case deeplink
+    }
 }
 
-public struct UnfurlResponse: Codable {
-    let url: String
-    let metadata: UnfurlMetadata
+public struct MatchResponse: Codable {
+    public let matches: [Match]
+    public let ttlSeconds: Int
+    
+    enum CodingKeys: String, CodingKey {
+        case matches
+        case ttlSeconds = "ttl_seconds"
+    }
+}
+
+public enum ConfidenceLevel: String {
+    case high = "HIGH"
+    case medium = "MEDIUM"
+    case low = "LOW"
+    
+    public var threshold: Int {
+        switch self {
+        case .high: return 75
+        case .medium: return 50
+        case .low: return 25
+        }
+    }
 }
 
 // Helper for handling dynamic JSON values

@@ -45,14 +45,63 @@ Task {
 }
 ```
 
+### SwiftUI Implementation
+
+Here's how to implement deep linking in a SwiftUI app:
+
+```swift
+struct ContentView: View {
+    @State private var isInitialized = false
+    @State private var lastReceivedDeepLink: URL? = nil
+
+    var body: some View {
+        VStack {
+            if let deepLink = lastReceivedDeepLink {
+                Text("Last Received Deep Link:")
+                    .font(.headline)
+                Text(deepLink.absoluteString)
+                    .foregroundColor(.blue)
+            }
+
+            Button(action: initDln) {
+                Text(!isInitialized ? "Initialize SDK" : "Initialized!")
+            }
+        }
+        .onAppear {
+            setupDeepLinkObserver()
+        }
+    }
+
+    private func setupDeepLinkObserver() {
+        NotificationCenter.default.addObserver(
+            forName: .init("DeepLinkReceived"),
+            object: nil,
+            queue: .main
+        ) { notification in
+            if let url = notification.object as? URL {
+                self.lastReceivedDeepLink = url
+            }
+        }
+    }
+
+    private func initDln() {
+        Task {
+            let config = DLNConfig(apiKey: "your-api-key", enableLogs: true)
+            await DeepLinkNow.initialize(config: config)
+            isInitialized = true
+        }
+    }
+}
+```
+
 ### Find Deferred User
 
 The SDK provides a powerful deferred deep linking system that can match users across installations:
 
 ```swift
 Task {
-    if let match = await DeepLinkNow.findDeferredUser() {
-        if let deepLink = match.match.deeplink {
+    if let response = await DeepLinkNow.findDeferredUser() {
+        if let deepLink = response.match.deeplink {
             // Access deep link properties
             print("Deep Link ID:", deepLink.id)
             print("Target URL:", deepLink.targetUrl)
@@ -62,12 +111,19 @@ Task {
             print("Expires At:", deepLink.expiresAt)
         }
 
+        // Access match details
+        if let details = response.match.matchDetails {
+            print("IP Match:", details.ipMatch.matched)
+            print("Device Match:", details.deviceMatch.matched)
+            print("Locale Match:", details.localeMatch.matched)
+        }
+
         // Access match confidence and TTL
-        print("Confidence Score:", match.match.confidenceScore)
-        print("TTL Seconds:", match.match.ttlSeconds)
+        print("Confidence Score:", response.match.confidenceScore)
+        print("TTL Seconds:", response.match.ttlSeconds)
 
         // Access attribution data if available
-        if let attribution = match.attribution {
+        if let attribution = response.attribution {
             print("Campaign:", attribution.campaign ?? "None")
             print("Source:", attribution.source ?? "None")
             print("Medium:", attribution.medium ?? "None")
@@ -108,23 +164,22 @@ if let (path, parameters) = DeepLinkNow.parseDeepLink(url) {
 
 ### Handle Universal Links
 
-Add this to your `AppDelegate`:
+In your `AppDelegate`:
 
 ```swift
-func application(_ application: UIApplication, continue userActivity: NSUserActivity, restorationHandler: @escaping ([UIUserActivityRestoring]?) -> Void) -> Bool {
-    if userActivity.activityType == NSUserActivityTypeBrowsingWeb,
-       let url = userActivity.webpageURL {
-        handleDeepLink(url)
-        return true
+class AppDelegate: UIResponder, UIApplicationDelegate {
+    func application(_ application: UIApplication, continue userActivity: NSUserActivity, restorationHandler: @escaping ([UIUserActivityRestoring]?) -> Void) -> Bool {
+        if userActivity.activityType == NSUserActivityTypeBrowsingWeb,
+           let url = userActivity.webpageURL {
+            handleDeepLink(url)
+            return true
+        }
+        return false
     }
-    return false
-}
 
-private func handleDeepLink(_ url: URL) {
-    if let (path, parameters) = DeepLinkNow.parseDeepLink(url) {
-        // Handle the deep link
-        print("Path:", path)
-        print("Parameters:", parameters)
+    private func handleDeepLink(_ url: URL) {
+        // For SwiftUI apps, use NotificationCenter to communicate with your views
+        NotificationCenter.default.post(name: .init("DeepLinkReceived"), object: url)
     }
 }
 ```

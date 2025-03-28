@@ -1,5 +1,5 @@
 PODS:
-  - DeepLinkNow (0.2.3)
+  - DeepLinkNow (0.2.10)
 
 DEPENDENCIES:
   - DeepLinkNow (from `../../`)
@@ -9,7 +9,7 @@ EXTERNAL SOURCES:
     :path: "../../"
 
 SPEC CHECKSUMS:
-  DeepLinkNow: 8860db6fe002b80fef938d352440de81f41d994b
+  DeepLinkNow: 2d8466b6375ff0ec22df09afcb99a93637b1a4ec
 
 PODFILE CHECKSUM: 7b7e7d965471f65450d6e4bfa9dd992a3ce04ae6
 

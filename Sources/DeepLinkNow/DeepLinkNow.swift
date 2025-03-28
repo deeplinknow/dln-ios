@@ -14,7 +14,7 @@ public final class DeepLinkNow {
     private init(config: DLNConfig, urlSession: URLSessionProtocol = URLSession.shared) {
         self.config = config
         self.urlSession = urlSession
-        self.installTime = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: "Z", with: "+00:00")
+        self.installTime = ISO8601DateFormatter().string(from: Date())
     }
     
     private func log(_ message: String, _ args: Any...) {
@@ -34,10 +34,11 @@ public final class DeepLinkNow {
         instance.log("Initializing with config:", config)
         
         do {
+            let initRequest = ["api_key": config.apiKey]
             let data = try await instance.makeAPIRequest(
                 endpoint: "init",
-                method: "GET",
-                body: nil
+                method: "POST",
+                body: initRequest
             )
             
             let decoder = JSONDecoder()
@@ -67,25 +68,53 @@ public final class DeepLinkNow {
     
     private func getFingerprint() -> Fingerprint {
         let device = UIDevice.current
+        let screen = UIScreen.main
         let dateFormatter = ISO8601DateFormatter()
-        dateFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         
         let currentTime = dateFormatter.string(from: Date())
-        let installTime = dateFormatter.string(from: Date().addingTimeInterval(-300)) // 5 minutes ago for testing
+        
+        // Generate user agent string that matches web format
+        let userAgent = "Mozilla/5.0 (\(device.model); CPU iOS \(device.systemVersion) like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/\(device.systemVersion) Mobile/15E148 Safari/604.1"
+        
+        // Determine device model based on device type, matching web implementation
+        let deviceModel: String
+        switch device.userInterfaceIdiom {
+        case .pad:
+            deviceModel = "iPad"
+        case .phone:
+            deviceModel = "iPhone"
+        default:
+            deviceModel = "iPhone" // Default to iPhone for other cases
+        }
+        
+        let metadata = FingerprintMetadata(
+            screenWidth: Int(screen.bounds.width * screen.scale),
+            screenHeight: Int(screen.bounds.height * screen.scale),
+            pixelRatio: round(Double(screen.scale) * 100) / 100, // Round to 2 decimal places
+            colorDepth: 32, // Standard for iOS
+            isTablet: device.userInterfaceIdiom == .pad,
+            connectionType: nil,
+            cpuCores: ProcessInfo.processInfo.processorCount,
+            deviceMemory: nil,
+            source: "mobile"
+        )
         
         return Fingerprint(
-            userAgent: "DLN-iOS/\(device.systemVersion)",
+            ipAddress: "", // Will be set by server
+            userAgent: userAgent,
             platform: "ios",
             osVersion: device.systemVersion,
-            deviceModel: device.model,
+            deviceModel: deviceModel,
             language: Locale.current.languageCode ?? "en",
             timezone: TimeZone.current.identifier,
             installedAt: installTime,
             lastOpenedAt: currentTime,
-            deviceId: UIDevice.current.identifierForVendor?.uuidString,
-            advertisingId: ASIdentifierManager.shared().advertisingIdentifier.uuidString,
-            vendorId: UIDevice.current.identifierForVendor?.uuidString ?? "test-vendor-id",
-            hardwareFingerprint: UIDevice.current.identifierForVendor?.uuidString ?? "test-hardware-fingerprint"
+            deviceId: device.identifierForVendor?.uuidString,
+            advertisingId: ASIdentifierManager.shared().isAdvertisingTrackingEnabled ? 
+                ASIdentifierManager.shared().advertisingIdentifier.uuidString : nil,
+            vendorId: device.identifierForVendor?.uuidString,
+            hardwareFingerprint: nil,
+            metadata: metadata
         )
     }
     
@@ -99,21 +128,39 @@ public final class DeepLinkNow {
         
         let fingerprint = shared.getFingerprint()
         
-        // Convert fingerprint to dictionary format
-        let fingerprintDict: [String: Any] = [
-            "user_agent": fingerprint.userAgent,
-            "platform": fingerprint.platform,
-            "os_version": fingerprint.osVersion,
-            "device_model": fingerprint.deviceModel,
-            "language": fingerprint.language,
-            "timezone": fingerprint.timezone,
-            "installed_at": fingerprint.installedAt,
-            "last_opened_at": fingerprint.lastOpenedAt,
-            "device_id": fingerprint.deviceId as Any,
-            "advertising_id": fingerprint.advertisingId as Any,
-            "vendor_id": fingerprint.vendorId as Any,
-            "hardware_fingerprint": fingerprint.hardwareFingerprint as Any
-        ]
+        // Break down the metadata dictionary creation
+        var metadata: [String: Any] = [:]
+        if let fingerprintMetadata = fingerprint.metadata {
+            metadata["screen_width"] = fingerprintMetadata.screenWidth
+            metadata["screen_height"] = fingerprintMetadata.screenHeight
+            if let pixelRatio = fingerprintMetadata.pixelRatio {
+                // Ensure the number is properly formatted for JSON
+                let roundedRatio = NSNumber(value: round(pixelRatio * 100) / 100)
+                metadata["pixel_ratio"] = roundedRatio
+            }
+            metadata["color_depth"] = fingerprintMetadata.colorDepth
+            metadata["is_tablet"] = fingerprintMetadata.isTablet
+            metadata["connection_type"] = fingerprintMetadata.connectionType
+            metadata["cpu_cores"] = fingerprintMetadata.cpuCores
+            metadata["device_memory"] = fingerprintMetadata.deviceMemory
+            metadata["source"] = fingerprintMetadata.source
+        }
+        
+        // Create the main fingerprint dictionary
+        var fingerprintDict: [String: Any] = [:]
+        fingerprintDict["platform"] = fingerprint.platform
+        fingerprintDict["os_version"] = fingerprint.osVersion
+        fingerprintDict["device_model"] = fingerprint.deviceModel
+        fingerprintDict["language"] = fingerprint.language
+        fingerprintDict["timezone"] = fingerprint.timezone
+        fingerprintDict["installed_at"] = fingerprint.installedAt
+        fingerprintDict["last_opened_at"] = fingerprint.lastOpenedAt
+        fingerprintDict["device_id"] = fingerprint.deviceId ?? ""
+        fingerprintDict["advertising_id"] = fingerprint.advertisingId ?? ""
+        fingerprintDict["vendor_id"] = fingerprint.vendorId ?? ""
+        fingerprintDict["hardware_fingerprint"] = fingerprint.hardwareFingerprint ?? ""
+        fingerprintDict["user_agent"] = fingerprint.userAgent
+        fingerprintDict["metadata"] = metadata
         
         let matchRequest = ["fingerprint": fingerprintDict]
         
