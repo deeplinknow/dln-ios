@@ -300,20 +300,20 @@ public struct FingerprintMatch: Codable {
 }
 
 public struct MatchComponentDetails: Codable {
-    let matched: Bool
-    let score: Double
+    public let matched: Bool
+    public let score: Double
 }
 
 public struct DeviceMatchDetails: Codable {
-    let matched: Bool
-    let score: Double
-    let components: DeviceMatchComponents
+    public let matched: Bool
+    public let score: Double
+    public let components: DeviceMatchComponents
     
-    struct DeviceMatchComponents: Codable {
-        let platform: Bool
-        let osVersion: Bool
-        let deviceModel: Bool
-        let hardwareFingerprint: Bool
+    public struct DeviceMatchComponents: Codable {
+        public let platform: Bool
+        public let osVersion: Bool
+        public let deviceModel: Bool
+        public let hardwareFingerprint: Bool
         
         enum CodingKeys: String, CodingKey {
             case platform
@@ -325,19 +325,19 @@ public struct DeviceMatchDetails: Codable {
 }
 
 public struct LocaleMatchDetails: Codable {
-    let matched: Bool
-    let score: Double
-    let components: LocaleMatchComponents
+    public let matched: Bool
+    public let score: Double
+    public let components: LocaleMatchComponents
     
-    struct LocaleMatchComponents: Codable {
-        let language: Bool
-        let timezone: Bool
+    public struct LocaleMatchComponents: Codable {
+        public let language: Bool
+        public let timezone: Bool
     }
 }
 
 public struct TimeProximityDetails: Codable {
-    let score: Double
-    let timeDifferenceMinutes: Int
+    public let score: Double
+    public let timeDifferenceMinutes: Int
     
     enum CodingKeys: String, CodingKey {
         case score
@@ -346,10 +346,10 @@ public struct TimeProximityDetails: Codable {
 }
 
 public struct MatchDetails: Codable {
-    let ipMatch: MatchComponentDetails
-    let deviceMatch: DeviceMatchDetails
-    let timeProximity: TimeProximityDetails
-    let localeMatch: LocaleMatchDetails
+    public let ipMatch: MatchComponentDetails
+    public let deviceMatch: DeviceMatchDetails
+    public let timeProximity: TimeProximityDetails
+    public let localeMatch: LocaleMatchDetails
     
     enum CodingKeys: String, CodingKey {
         case ipMatch = "ip_match"
@@ -377,7 +377,8 @@ public struct DeeplinkMatch: Codable {
     }
 }
 
-public struct Match: Codable {
+public struct Match: Codable, Identifiable {
+    public let id = UUID()
     public let confidenceScore: Double
     public let matchDetails: MatchDetails
     public let deeplink: DeeplinkMatch?

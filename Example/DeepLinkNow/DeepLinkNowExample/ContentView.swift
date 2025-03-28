@@ -1,55 +1,6 @@
 import SwiftUI
 import DeepLinkNow
 
-public struct Match: Identifiable {
-    public let id = UUID()
-    public let confidenceScore: Double
-    public let matchDetails: MatchDetails?
-    public let deeplink: DeeplinkInfo?
-    
-    public struct MatchDetails {
-        public let ipMatch: MatchComponent
-        public let deviceMatch: MatchComponent
-        public let localeMatch: MatchComponent
-        
-        public struct MatchComponent {
-            public let matched: Bool
-            public let score: Double
-            
-            public init(matched: Bool, score: Double) {
-                self.matched = matched
-                self.score = score
-            }
-        }
-        
-        public init(ipMatch: MatchComponent, deviceMatch: MatchComponent, localeMatch: MatchComponent) {
-            self.ipMatch = ipMatch
-            self.deviceMatch = deviceMatch
-            self.localeMatch = localeMatch
-        }
-    }
-    
-    public struct DeeplinkInfo {
-        public let targetUrl: String
-        public let campaignId: String?
-        public let matchedAt: Date
-        public let expiresAt: Date
-        
-        public init(targetUrl: String, campaignId: String?, matchedAt: Date, expiresAt: Date) {
-            self.targetUrl = targetUrl
-            self.campaignId = campaignId
-            self.matchedAt = matchedAt
-            self.expiresAt = expiresAt
-        }
-    }
-    
-    public init(confidenceScore: Double, matchDetails: MatchDetails?, deeplink: DeeplinkInfo?) {
-        self.confidenceScore = confidenceScore
-        self.matchDetails = matchDetails
-        self.deeplink = deeplink
-    }
-}
-
 struct ContentView: View {
     @State private var isInitialized = false
     @State private var matches: [Match]? = nil
@@ -101,6 +52,7 @@ struct ContentView: View {
                 if let matches = matches, !matches.isEmpty {
                     Text("Match results")
                         .font(.headline)
+                        .padding(.top, 20)
                     
                     ForEach(matches) { match in
                         MatchCard(match: match)
@@ -130,13 +82,8 @@ struct ContentView: View {
         Task {
             let config = DLNConfig(apiKey: "web-test-api-key", enableLogs: true)
             await DeepLinkNow.initialize(config: config)
-            isInitialized = true
-            
-            // Check for deferred deep links
-            if let response = await DeepLinkNow.findDeferredUser() {
-                // Convert response to matches
-                // This is a placeholder - implement based on your SDK's response format
-                print(response)
+            await MainActor.run {
+                isInitialized = true
             }
         }
     }
@@ -150,47 +97,8 @@ struct ContentView: View {
     private func findDeferredUser() {
         Task {
             if let response = await DeepLinkNow.findDeferredUser() {
-                let convertedMatches = response.matches.map { apiMatch -> Match in
-                    // Convert match details
-                    let matchDetails = Match.MatchDetails(
-                        ipMatch: Match.MatchDetails.MatchComponent(
-                            matched: apiMatch.matchDetails.ipMatch.matched,
-                            score: apiMatch.matchDetails.ipMatch.score
-                        ),
-                        deviceMatch: Match.MatchDetails.MatchComponent(
-                            matched: apiMatch.matchDetails.deviceMatch.matched,
-                            score: apiMatch.matchDetails.deviceMatch.score
-                        ),
-                        localeMatch: Match.MatchDetails.MatchComponent(
-                            matched: apiMatch.matchDetails.localeMatch.matched,
-                            score: apiMatch.matchDetails.localeMatch.score
-                        )
-                    )
-                    
-                    // Convert deeplink info if present
-                    let deeplinkInfo: Match.DeeplinkInfo?
-                    if let apiDeeplink = apiMatch.deeplink {
-                        let dateFormatter = ISO8601DateFormatter()
-                        deeplinkInfo = Match.DeeplinkInfo(
-                            targetUrl: apiDeeplink.targetUrl,
-                            campaignId: apiDeeplink.campaignId,
-                            matchedAt: dateFormatter.date(from: apiDeeplink.matchedAt) ?? Date(),
-                            expiresAt: dateFormatter.date(from: apiDeeplink.expiresAt) ?? Date()
-                        )
-                    } else {
-                        deeplinkInfo = nil
-                    }
-                    
-                    return Match(
-                        confidenceScore: apiMatch.confidenceScore,
-                        matchDetails: matchDetails,
-                        deeplink: deeplinkInfo
-                    )
-                }
-                
-                // Update the UI on the main thread
                 await MainActor.run {
-                    self.matches = convertedMatches
+                    self.matches = response.matches
                 }
             }
         }
@@ -240,30 +148,28 @@ struct MatchCard: View {
                 .padding(.bottom, 16)
             }
             
-            if let details = match.matchDetails {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Match Details")
-                        .font(.system(size: 16, weight: .bold))
-                        .foregroundColor(Color(.darkText))
-                    
-                    MatchDetailRow(
-                        label: "IP Match",
-                        matched: details.ipMatch.matched,
-                        score: details.ipMatch.score
-                    )
-                    
-                    MatchDetailRow(
-                        label: "Device Match",
-                        matched: details.deviceMatch.matched,
-                        score: details.deviceMatch.score
-                    )
-                    
-                    MatchDetailRow(
-                        label: "Locale Match",
-                        matched: details.localeMatch.matched,
-                        score: details.localeMatch.score
-                    )
-                }
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Match Details")
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundColor(Color(.darkText))
+                
+                MatchDetailRow(
+                    label: "IP Match",
+                    matched: match.matchDetails.ipMatch.matched,
+                    score: match.matchDetails.ipMatch.score
+                )
+                
+                MatchDetailRow(
+                    label: "Device Match",
+                    matched: match.matchDetails.deviceMatch.matched,
+                    score: match.matchDetails.deviceMatch.score
+                )
+                
+                MatchDetailRow(
+                    label: "Locale Match",
+                    matched: match.matchDetails.localeMatch.matched,
+                    score: match.matchDetails.localeMatch.score
+                )
             }
         }
         .padding(16)
@@ -277,11 +183,17 @@ struct MatchCard: View {
         )
     }
     
-    private func formatDate(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .medium
-        return formatter.string(from: date)
+    private func formatDate(_ dateString: String) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        
+        if let date = formatter.date(from: dateString) {
+            let displayFormatter = DateFormatter()
+            displayFormatter.dateStyle = .medium
+            displayFormatter.timeStyle = .medium
+            return displayFormatter.string(from: date)
+        }
+        return dateString
     }
 }
 
