@@ -30,7 +30,7 @@ Pod::Spec.new do |s|
                       It supports custom parameters, universal links, and clipboard detection.
                       DESC
 
-  s.homepage         = 'https://github.com/jvgeee/dln-ios'
+  s.homepage         = 'https://github.com/deeplinknow/dln-ios'
   # spec.screenshots  = "www.example.com/screenshots_1.gif", "www.example.com/screenshots_2.gif"
 
 
@@ -87,9 +87,9 @@ Pod::Spec.new do |s|
   #  Supports git, hg, bzr, svn and HTTP.
   #
 
-  s.source           = { 
-    :git => 'https://github.com/jvgeee/dln-ios.git', 
-    :tag => s.version.to_s 
+  s.source           = {
+    :git => 'https://github.com/deeplinknow/dln-ios.git',
+    :tag => s.version.to_s
   }
 
 
