@@ -22,11 +22,6 @@ fi
 # Optional commit message
 COMMIT_MESSAGE=${2:-"Bump version"}
 
-# Define repositories
-MONOREPO_ROOT="$(git rev-parse --show-toplevel)"
-PUBLIC_REPO_URL="git@github.com:deeplinknow/dln-ios.git"
-SUBTREE_PREFIX="packages/dln-ios"
-
 # Get current version from podspec
 CURRENT_VERSION=$(grep -m 1 "s.version" DeepLinkNow.podspec | sed "s/.*[\"\']\(.*\)[\"\']/\1/")
 echo "Current version: $CURRENT_VERSION"
@@ -64,36 +59,21 @@ fi
 # Update version in README.md
 sed -i '' "s/Version.*svg/Version](https:\/\/img.shields.io\/cocoapods\/v\/DeepLinkNow.svg/g" README.md
 
-# Git operations in monorepo
-echo "Committing changes to monorepo..."
-cd "$MONOREPO_ROOT"
-git add "$SUBTREE_PREFIX/DeepLinkNow.podspec" "$SUBTREE_PREFIX/Package.swift" "$SUBTREE_PREFIX/README.md"
+# Git operations
+echo "Committing changes..."
+git add DeepLinkNow.podspec Package.swift README.md
 git commit -m "$COMMIT_MESSAGE: $NEW_VERSION"
-git push origin main
 
-# Push to public iOS repository using git subtree split + force push
-# Note: Using force push since the repos have diverged during monorepo migration
-echo "Pushing to public iOS repository..."
-git subtree split --prefix="$SUBTREE_PREFIX" -b temp-ios-deploy
-git push "$PUBLIC_REPO_URL" temp-ios-deploy:main --force
-git branch -D temp-ios-deploy
-
-# Tag the release in monorepo
+# Tag the release
 echo "Creating and pushing tag $NEW_VERSION..."
 git tag "$NEW_VERSION"
+
+# Push to GitHub
+echo "Pushing to GitHub..."
+git push origin main
 git push origin "$NEW_VERSION"
 
-# Also tag in the public repo
-echo "Tagging public repository..."
-TEMP_DIR=$(mktemp -d)
-git clone "$PUBLIC_REPO_URL" "$TEMP_DIR"
-cd "$TEMP_DIR"
-git tag "$NEW_VERSION"
-git push origin "$NEW_VERSION"
-cd "$MONOREPO_ROOT/$SUBTREE_PREFIX"
-rm -rf "$TEMP_DIR"
-
-echo "✅ Successfully pushed to both monorepo and public repository"
+echo "✅ Successfully pushed to GitHub"
 
 # Validate podspec
 echo "Validating podspec..."
@@ -103,4 +83,4 @@ pod spec lint DeepLinkNow.podspec --allow-warnings
 echo "Publishing to CocoaPods..."
 pod trunk push DeepLinkNow.podspec --allow-warnings
 
-echo "✅ Successfully deployed version $NEW_VERSION to CocoaPods!" 
+echo "✅ Successfully deployed version $NEW_VERSION to CocoaPods and GitHub!" 
