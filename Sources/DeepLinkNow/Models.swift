@@ -1,9 +1,10 @@
 import Foundation
-import UIKit
-import CoreTelephony
-import AdSupport
 
-// Configuration
+/// SDK configuration (SDK-01).
+/// - `enableLogs`: debug logging (default `false`). The API key is never logged.
+/// - `baseUrl`: default `https://deeplinknow.com`; a trailing `/` is tolerated.
+/// - `timeout`: per-request timeout in seconds (default 10).
+/// - `retryAttempts`: retries for transient failures (default 2; 4xx is never retried).
 public struct DLNConfig {
     public let apiKey: String
     public let enableLogs: Bool
@@ -26,7 +27,8 @@ public struct DLNConfig {
     }
 }
 
-// Error types
+/// Legacy error type (SDK <= 1.0.x). The throwing APIs added in 1.1 throw
+/// `DeepLinkNowError`, which carries the SDK-55 error codes.
 public enum DLNError: Error {
     case invalidURL
     case serverError(String, String?, String?)  // error, status?, details?
@@ -85,15 +87,15 @@ public struct CustomDomain: Codable {
 
 public struct AppConfig: Codable {
     let id: String
-    let name: String
-    let timezone: String
+    let name: String?
+    let timezone: String?
     let alias: String
     let androidPackageName: String?
     let androidSha256Cert: String?
     let iosBundleId: String?
     let iosAppStoreId: String?
     let iosAppPrefix: String?
-    let customDomains: [CustomDomain]
+    let customDomains: [CustomDomain]?
     
     enum CodingKeys: String, CodingKey {
         case id, name, timezone, alias
@@ -124,8 +126,8 @@ public struct AccountConfig: Codable {
     }
     
     let status: Status
-    let creditsRemaining: Int
-    let rateLimits: RateLimits
+    let creditsRemaining: Int?
+    let rateLimits: RateLimits?
     
     enum CodingKeys: String, CodingKey {
         case status
@@ -288,11 +290,23 @@ public struct LocaleMatchDetails: Codable, Sendable {
 
 public struct TimeProximityDetails: Codable, Sendable {
     public let score: Double
+    /// Whole minutes, rounded up. A fractional value from the server is rounded up (IOS-17).
     public let timeDifferenceMinutes: Int
     
     enum CodingKeys: String, CodingKey {
         case score
         case timeDifferenceMinutes = "time_difference_minutes"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        score = try c.decode(Double.self, forKey: .score)
+        if let whole = try? c.decode(Int.self, forKey: .timeDifferenceMinutes) {
+            timeDifferenceMinutes = whole
+        } else {
+            let minutes = try c.decode(Double.self, forKey: .timeDifferenceMinutes)
+            timeDifferenceMinutes = minutes.isFinite ? Int(minutes.rounded(.up)) : 0
+        }
     }
 }
 
@@ -317,6 +331,10 @@ public struct DeeplinkMatch: Codable, Sendable {
     public let campaignId: String?
     public let matchedAt: String
     public let expiresAt: String
+    /// The tapped URL's query parameters (FLOW-53: string, flag or list). `nil` from older servers.
+    public let queryParams: [String: DLNQueryValue]?
+    /// The tapped path plus query as the server returns it. `nil` from older servers.
+    public let fullPath: String?
     
     enum CodingKeys: String, CodingKey {
         case id
@@ -325,19 +343,69 @@ public struct DeeplinkMatch: Codable, Sendable {
         case campaignId = "campaign_id"
         case matchedAt = "matched_at"
         case expiresAt = "expires_at"
+        case queryParams = "query_params"
+        case fullPath = "full_path"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        targetUrl = (try? c.decodeIfPresent(String.self, forKey: .targetUrl)) ?? ""
+        metadata = (try? c.decodeIfPresent([String: AnyCodable].self, forKey: .metadata)) ?? [:]
+        campaignId = try? c.decodeIfPresent(String.self, forKey: .campaignId)
+        matchedAt = (try? c.decodeIfPresent(String.self, forKey: .matchedAt)) ?? ""
+        expiresAt = (try? c.decodeIfPresent(String.self, forKey: .expiresAt)) ?? ""
+        fullPath = try? c.decodeIfPresent(String.self, forKey: .fullPath)
+        if let raw = try? c.decodeIfPresent([String: AnyCodable].self, forKey: .queryParams) {
+            queryParams = raw.compactMapValues { DLNQueryValue(json: $0.value) }
+        } else {
+            queryParams = nil
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(targetUrl, forKey: .targetUrl)
+        try c.encode(metadata, forKey: .metadata)
+        try c.encodeIfPresent(campaignId, forKey: .campaignId)
+        try c.encode(matchedAt, forKey: .matchedAt)
+        try c.encode(expiresAt, forKey: .expiresAt)
+        try c.encodeIfPresent(queryParams, forKey: .queryParams)
+        try c.encodeIfPresent(fullPath, forKey: .fullPath)
     }
 }
 
 public struct Match: Codable, Identifiable, Sendable {
     public let id = UUID()
     public let confidenceScore: Double
+    /// Server label (`match_quality`). Derived from `confidenceScore` when an older server omits it (SDK-16).
+    public let matchQuality: ConfidenceLevel
     public let matchDetails: MatchDetails
     public let deeplink: DeeplinkMatch?
     
     enum CodingKeys: String, CodingKey {
         case confidenceScore = "confidence_score"
+        case matchQuality = "match_quality"
         case matchDetails = "match_details"
         case deeplink
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        confidenceScore = try c.decode(Double.self, forKey: .confidenceScore)
+        let raw = (try? c.decodeIfPresent(String.self, forKey: .matchQuality)) ?? nil
+        matchQuality = raw.flatMap { ConfidenceLevel(rawValue: $0.uppercased()) } ?? ConfidenceLevel.forScore(confidenceScore)
+        matchDetails = try c.decode(MatchDetails.self, forKey: .matchDetails)
+        deeplink = try c.decodeIfPresent(DeeplinkMatch.self, forKey: .deeplink)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(confidenceScore, forKey: .confidenceScore)
+        try c.encode(matchQuality, forKey: .matchQuality)
+        try c.encode(matchDetails, forKey: .matchDetails)
+        try c.encodeIfPresent(deeplink, forKey: .deeplink)
     }
 }
 
@@ -351,17 +419,27 @@ public struct MatchResponse: Codable, Sendable {
     }
 }
 
-public enum ConfidenceLevel: String {
+/// The server's `match_quality` label: HIGH >= 75, MEDIUM >= 50, LOW otherwise
+/// (the server never returns candidates below 30).
+public enum ConfidenceLevel: String, Codable, Sendable {
     case high = "HIGH"
     case medium = "MEDIUM"
     case low = "LOW"
     
+    /// Lower bound of the band. LOW starts at the server floor of 30.
     public var threshold: Int {
         switch self {
         case .high: return 75
         case .medium: return 50
-        case .low: return 25
+        case .low: return 30
         }
+    }
+
+    /// Server thresholds (SDK-16), used when an older server omits `match_quality`.
+    public static func forScore(_ score: Double) -> ConfidenceLevel {
+        if score >= 75 { return .high }
+        if score >= 50 { return .medium }
+        return .low
     }
 }
 

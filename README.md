@@ -4,214 +4,165 @@
 [![License](https://img.shields.io/cocoapods/l/DeepLinkNow.svg?style=flat)](https://cocoapods.org/pods/DeepLinkNow)
 [![Platform](https://img.shields.io/cocoapods/p/DeepLinkNow.svg?style=flat)](https://cocoapods.org/pods/DeepLinkNow)
 
-DeepLinkNow (DLN) is a lightweight SDK for handling deferred deep linking in iOS applications.
+DeepLinkNow (DLN) does one thing: it gets a new user to the place in your app they tapped before installing (deferred deep linking). It has no analytics, no attribution and no advertising identifiers, and it never shows the ATT prompt.
+
+On iOS the SDK reads the link the DLN landing page copied to the pasteboard (exact), and uses fingerprint matching as a scored backup.
 
 ## Requirements
 
 - iOS 13.0+
-- Swift 5.0+
-- Xcode 13.0+
+- Swift 5.5+ (async/await)
+- Xcode 13.2+
 
 ## Installation
 
-Add this to your `Podfile`:
+### CocoaPods
 
 ```ruby
-pod 'DeepLinkNow'
+pod 'DeepLinkNow', '~> 1.1'
 ```
 
-Then run:
+### Swift Package Manager
 
-```bash
-pod install
+```swift
+.package(url: "https://github.com/deeplinknow/dln-ios.git", from: "1.1.0")
 ```
+
+No `Info.plist` keys are needed.
+
+### Universal Links
+
+1. In the DLN dashboard, set your app's **Team ID / App ID prefix** and **Bundle ID**. DLN serves `apple-app-site-association` for your link domains from those values.
+2. In Xcode, **Signing & Capabilities → Associated Domains**, add `applinks:<your-alias>.deeplinknow.com`, plus `applinks:<your-custom-domain>` if you have one.
 
 ## Usage
 
-### Initialize the SDK
+### 1. Initialize
 
 ```swift
-// In your AppDelegate or initialization code
-Task {
-    // Basic initialization
-    let config = DLNConfig(
-        apiKey: "your-api-key",
-        enableLogs: true,  // Optional: Enable debug logging
-        baseUrl: nil,      // Optional: Custom API endpoint
-        timeout: nil,      // Optional: Custom timeout
-        retryAttempts: nil // Optional: Number of retry attempts
-    )
-    await DeepLinkNow.initialize(config: config)
+import DeepLinkNow
+
+do {
+    let app = try await DeepLinkNow.initializeThrowing(config: DLNConfig(apiKey: "your-public-api-key"))
+    print("Link domains:", app.linkDomains)
+} catch let error as DeepLinkNowError {
+    // .invalidApiKey, .accountInactive, .noCredits, .rateLimited, .network, .server,
+    // .invalidResponse, .invalidConfiguration
+    print("DeepLinkNow init failed:", error.code)
 }
 ```
 
-### SwiftUI Implementation
+`DLNConfig(apiKey:enableLogs:baseUrl:timeout:retryAttempts:)`:
 
-Here's how to implement deep linking in a SwiftUI app:
+| Option | Default | |
+|---|---|---|
+| `enableLogs` | `false` | Debug logs prefixed `[DeepLinkNow]`. The API key is never logged. |
+| `baseUrl` | `https://deeplinknow.com` | A trailing `/` is fine. Must be https (http only for localhost). |
+| `timeout` | `10` s | Per request. |
+| `retryAttempts` | `2` | Retries transport errors, timeouts, 5xx and 429 with backoff. 4xx is never retried. |
+
+The original `await DeepLinkNow.initialize(config:)` still works. It logs failures instead of throwing; check `DeepLinkNow.isInitialized` and `DeepLinkNow.initializationError`.
+
+### 2. Get the deferred deep link (first launch)
 
 ```swift
-struct ContentView: View {
-    @State private var isInitialized = false
-    @State private var lastReceivedDeepLink: URL? = nil
-
-    var body: some View {
-        VStack {
-            if let deepLink = lastReceivedDeepLink {
-                Text("Last Received Deep Link:")
-                    .font(.headline)
-                Text(deepLink.absoluteString)
-                    .foregroundColor(.blue)
-            }
-
-            Button(action: initDln) {
-                Text(!isInitialized ? "Initialize SDK" : "Initialized!")
-            }
-        }
-        .onAppear {
-            setupDeepLinkObserver()
-        }
+do {
+    if let link = try await DeepLinkNow.checkDeferredDeepLink() {
+        // link.path        "/products/123"           (not decoded)
+        // link.queryParams ["ref": .string("newsletter")]
+        // link.fullPath    "/products/123?ref=newsletter"
+        // link.url         "https://myapp.deeplinknow.com/products/123?ref=newsletter"
+        // link.source      .clipboard or .fingerprint
+        // link.confidenceScore / link.matchQuality (100 / .high for the clipboard)
+        router.open(path: link.path, query: link.queryParams)
     }
-
-    private func setupDeepLinkObserver() {
-        NotificationCenter.default.addObserver(
-            forName: .init("DeepLinkReceived"),
-            object: nil,
-            queue: .main
-        ) { notification in
-            if let url = notification.object as? URL {
-                self.lastReceivedDeepLink = url
-            }
-        }
-    }
-
-    private func initDln() {
-        Task {
-            let config = DLNConfig(apiKey: "your-api-key", enableLogs: true)
-            await DeepLinkNow.initialize(config: config)
-            isInitialized = true
-        }
-    }
+} catch let error as DeepLinkNowError {
+    // Not initialized, offline, server error… The first launch is not consumed; try again later.
 }
 ```
 
-### Find Deferred User
+What it does:
 
-The SDK provides a powerful deferred deep linking system that can match users across installations:
+1. **Pasteboard** (`useClipboard`, default `true`): if the pasteboard holds a link on one of your link domains, that link is returned (`source: .clipboard`) and no match request is made. On iOS 16+ the system may ask the user to allow pasting from Safari; "Don't Allow" just moves on to step 2. A pattern check that does not show the prompt runs first, so there is no prompt when the pasteboard has no web URL.
+2. **Fingerprint** (`POST /api/v1/sdk/match`): the first server candidate (sorted by confidence) that has a deep link is returned (`source: .fingerprint`) with the server's `confidenceScore` and `matchQuality` (HIGH ≥ 75, MEDIUM ≥ 50, LOW ≥ 30).
+
+Options (`DLNDeferredOptions`):
 
 ```swift
-Task {
-    if let response = await DeepLinkNow.findDeferredUser() {
-        if let deepLink = response.match.deeplink {
-            // Access deep link properties
-            print("Deep Link ID:", deepLink.id)
-            print("Target URL:", deepLink.targetUrl)
-            print("Campaign ID:", deepLink.campaignId ?? "None")
-            print("Metadata:", deepLink.metadata)
-            print("Matched At:", deepLink.matchedAt)
-            print("Expires At:", deepLink.expiresAt)
-        }
+try await DeepLinkNow.checkDeferredDeepLink(DLNDeferredOptions(
+    minConfidence: 50,   // default nil = accept every candidate; you choose the threshold
+    useClipboard: false, // skip the pasteboard (no paste prompt; fingerprint only)
+    force: false         // ignore the first-launch flag
+))
+```
 
-        // Access match details
-        if let details = response.match.matchDetails {
-            print("IP Match:", details.ipMatch.matched)
-            print("Device Match:", details.deviceMatch.matched)
-            print("Locale Match:", details.localeMatch.matched)
-        }
+**First launch only.** After a definitive answer (a link, or definitely nothing) the SDK sets a flag in `UserDefaults` (`com.deeplinknow.deferredCheckCompleted`), and later calls return `nil` without network or pasteboard access. Errors do not set the flag. The pasteboard is read at most once per install. Call `DeepLinkNow.resetDeferredDeepLink()` to clear this state while testing. Concurrent calls share one run.
 
-        // Access match confidence and TTL
-        print("Confidence Score:", response.match.confidenceScore)
-        print("TTL Seconds:", response.match.ttlSeconds)
+### 3. Universal Links that open the installed app
 
-        // Access attribution data if available
-        if let attribution = response.attribution {
-            print("Campaign:", attribution.campaign ?? "None")
-            print("Source:", attribution.source ?? "None")
-            print("Medium:", attribution.medium ?? "None")
-        }
-    }
+```swift
+// SwiftUI
+.onOpenURL { url in
+    if let link = DeepLinkNow.parseLink(url) { router.open(path: link.path, query: link.queryParams) }
+}
+
+// UIKit
+func application(_ application: UIApplication, continue userActivity: NSUserActivity,
+                 restorationHandler: @escaping ([UIUserActivityRestoring]?) -> Void) -> Bool {
+    guard userActivity.activityType == NSUserActivityTypeBrowsingWeb,
+          let url = userActivity.webpageURL,
+          let link = DeepLinkNow.parseLink(url) else { return false }
+    router.open(path: link.path, query: link.queryParams)
+    return true
 }
 ```
 
-### Create Deep Links
+`parseLink` returns `DLNParsedLink` (`path`, `queryParams`, `fullPath`, `url`), the same shape and rules as `checkDeferredDeepLink`, so deferred and direct opens route identically. `parseDeepLink(_:)` returns the same data as a `(path, parameters)` tuple, with `String`, `true` or `[String]` values.
 
-```swift
-// Create deep link with custom parameters
-let customParams = DLNCustomParameters([
-    "referrer": "social_share",
-    "campaign": "summer_sale",
-    "is_promo": true,
-    "discount": 20
-])
+Query parameters follow `URLSearchParams`: `+` is a space, `?flag` and `?flag=` become `.flag`, and a repeated key becomes `.list([...])`. `DLNQueryValue` has `stringValue`, `stringValues` and `anyValue`.
 
-if let url = DeepLinkNow.createDeepLink(
-    path: "/product/123",
-    customParameters: customParams
-) {
-    // Use the generated deep link
-    print("Generated URL:", url)
-}
-```
+### Link domains
 
-### Parse Deep Links
+After initialization, a link is accepted only when its host exactly equals (ignoring case) one of your app's link domains:
 
-```swift
-if let (path, parameters) = DeepLinkNow.parseDeepLink(url) {
-    // Handle the deep link components
-    print("Path:", path)
-    print("Parameters:", parameters)
-}
-```
+- `<your-alias>.deeplinknow.com`
+- your verified custom domain(s)
 
-### Handle Universal Links
+Other `*.deeplinknow.com` subdomains, the apex `deeplinknow.com` and lookalike hosts are rejected. Before initialization has finished, `parseLink` / `isValidDomain` provisionally accept any `<alias>.deeplinknow.com` (but not custom domains), so a cold-start Universal Link is not lost.
 
-In your `AppDelegate`:
+### Other APIs
 
-```swift
-class AppDelegate: UIResponder, UIApplicationDelegate {
-    func application(_ application: UIApplication, continue userActivity: NSUserActivity, restorationHandler: @escaping ([UIUserActivityRestoring]?) -> Void) -> Bool {
-        if userActivity.activityType == NSUserActivityTypeBrowsingWeb,
-           let url = userActivity.webpageURL {
-            handleDeepLink(url)
-            return true
-        }
-        return false
-    }
+| API | |
+|---|---|
+| `DeepLinkNow.findDeferredUserThrowing() async throws -> MatchResponse` | All fingerprint candidates, unfiltered, with `matchQuality`, `deeplink.queryParams`, `deeplink.fullPath`. |
+| `DeepLinkNow.findDeferredUser() async -> MatchResponse?` | Same, `nil` on any error. |
+| `DeepLinkNow.checkClipboard() -> String?` | The pasteboard text if it is exactly one link on your domains. Reads the pasteboard (may prompt). |
+| `DeepLinkNow.hasDeepLinkToken() -> Bool` | Cheap hint (`hasURLs`/`hasStrings`), never reads the content, never prompts. |
+| `DeepLinkNow.hasDeepLinkTokenAsync() async -> Bool` | Same, using `detectPatterns(for: [.probableWebURL])` on iOS 14+. |
+| `DeepLinkNow.isValidDomain(_ host:) -> Bool` | The link-domain rule above. |
+| `DeepLinkNow.createDeepLink(path:customParameters:) -> URL?` | An https link on your primary link domain (custom domain if verified) that `parseLink` round-trips. `nil` before init. |
+| `DeepLinkNow.isInitialized`, `initializationError`, `appInfo` | Init state. |
 
-    private func handleDeepLink(_ url: URL) {
-        // For SwiftUI apps, use NotificationCenter to communicate with your views
-        NotificationCenter.default.post(name: .init("DeepLinkReceived"), object: url)
-    }
-}
-```
+Deprecated: `handleUniversalLink(_:)` (use `parseLink(_:)`; it now returns the parsed link) and `handleCustomScheme(_:)` (custom URL schemes are not supported; it does nothing).
 
-### Domain Validation
+## Privacy
 
-The SDK automatically validates deep links against:
+The SDK ships a `PrivacyInfo.xcprivacy`:
 
-- deeplinknow.com
-- deeplink.now
-- Your app's verified custom domains (configured in the dashboard)
+- `NSPrivacyTracking = false`, no tracking domains.
+- Collected: Device ID (the `identifierForVendor`, IDFV) for App Functionality, not linked to identity, not used for tracking. The server uses it to claim a click for this install.
+- Required-reason API: `UserDefaults` (`CA92.1`) for the first-launch state.
 
-These domains are automatically loaded during SDK initialization.
-
-### Rate Limits and Account Status
-
-The SDK includes built-in rate limiting and account status monitoring:
-
-- Matches per second limit
-- Matches per day limit
-- Account status tracking (active/suspended/expired)
-- Remaining credits monitoring
+The match request sends: a Safari-style user agent, `ios`, OS version, device class (`iPhone`/`iPad`), locale, time zone, screen size in points and scale, CPU core count, and the IDFV. It never reads the IDFA, never links AdSupport or AppTrackingTransparency, and never sends an IP address (the server sees the connection). Nothing is stored on the device except the first-launch state and a copy of the last `/init` result (your public key, link domains and app info, no device data), which lets a launch within 24 hours skip the network call.
 
 ## Documentation
 
-For detailed documentation, visit [docs.deeplinknow.com](https://docs.deeplinknow.com)
+Full reference: [DOCS.md](DOCS.md) and [deeplinknow.com/docs/ios](https://deeplinknow.com/docs/ios).
 
 ## Support
 
-- 📧 Email: support@deeplinknow.com
-- 💬 Discord: [Join our community](https://discord.gg/deeplinknow)
+- Email: support@deeplinknow.com
 
 ## License
 
-DeepLinkNow is available under the MIT license. See the [LICENSE](LICENSE) file for more info.
+DeepLinkNow is available under the MIT license. See [LICENSE.txt](LICENSE.txt).

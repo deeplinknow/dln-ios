@@ -1,250 +1,86 @@
-import SwiftUI
 import DeepLinkNow
+import SwiftUI
 
 struct ContentView: View {
-    @State private var isInitialized = false
-    @State private var matches: [Match]? = nil
-    @State private var lastReceivedDeepLink: URL? = nil
-    @State private var clipboardContent: String? = nil
-    
+    @ObservedObject var model: DeepLinkModel
+
+    private let minConfidenceOptions: [Double?] = [nil, 30, 50, 75]
+
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                Text("DeepLinkNow")
-                    .font(.system(size: 30, weight: .bold))
-                    .padding(.top, 60)
-                
-                if let deepLink = lastReceivedDeepLink {
-                    Text("Last Received Deep Link:")
-                        .font(.headline)
-                    Text(deepLink.absoluteString)
-                        .font(.system(size: 14))
-                        .foregroundColor(.blue)
-                        .padding(.bottom, 20)
+        NavigationView {
+            Form {
+                Section(header: Text("1. Initialize")) {
+                    if let error = model.initError {
+                        Text("Init failed: \(error)").foregroundColor(.red)
+                    } else {
+                        Text(model.isInitialized ? "Initialized" : "Initializing…")
+                    }
                 }
-                
-                Button(action: initDln) {
-                    Text(!isInitialized ? "Init DLN" : "Initialized!")
-                        .foregroundColor(.white)
-                        .frame(maxWidth: .infinity)
-                        .padding()
-                        .background(Color.blue)
-                        .cornerRadius(5)
+
+                Section(header: Text("2. Deferred deep link (first launch)")) {
+                    if let error = model.deferredError {
+                        Text(error).foregroundColor(.red)
+                    }
+                    switch model.deferredLink {
+                    case .none:
+                        Text("Not checked yet")
+                    case .some(.none):
+                        Text("No deferred deep link")
+                    case .some(.some(let link)):
+                        Row(label: "path", value: link.path)
+                        Row(label: "queryParams", value: describe(link.queryParams))
+                        Row(label: "fullPath", value: link.fullPath)
+                        Row(label: "source", value: link.source.rawValue)
+                        Row(label: "confidenceScore", value: String(format: "%.0f", link.confidenceScore))
+                        Row(label: "matchQuality", value: link.matchQuality.rawValue)
+                    }
+
+                    Picker("minConfidence", selection: $model.minConfidence) {
+                        ForEach(minConfidenceOptions, id: \.self) { value in
+                            Text(value.map { String(format: "%.0f", $0) } ?? "Off").tag(value)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+
+                    Button("Check again (force)") {
+                        Task { await model.checkDeferredDeepLink(force: true) }
+                    }
+                    .disabled(!model.isInitialized)
+
+                    Button("Reset deferred link") { model.resetDeferredDeepLink() }
+                        .disabled(!model.isInitialized)
                 }
-                
-                Button(action: checkClipboardForDeepLink) {
-                    Text("Check Clipboard")
-                        .foregroundColor(.white)
-                        .frame(maxWidth: .infinity)
-                        .padding()
-                        .background(Color.blue)
-                        .cornerRadius(5)
-                }
-                
-                if let content = clipboardContent {
-                    Text("Clipboard Content:")
-                        .font(.headline)
-                    Text(content)
-                        .font(.system(size: 14))
-                        .foregroundColor(.blue)
-                        .padding(.bottom, 20)
-                }
-                
-                Button(action: visitExternalDeeplinkPage) {
-                    Text("Visit External Deeplink Page")
-                        .foregroundColor(.white)
-                        .frame(maxWidth: .infinity)
-                        .padding()
-                        .background(Color.blue)
-                        .cornerRadius(5)
-                }
-                
-                Button(action: findDeferredUser) {
-                    Text("Find Deferred User")
-                        .foregroundColor(.white)
-                        .frame(maxWidth: .infinity)
-                        .padding()
-                        .background(Color.blue)
-                        .cornerRadius(5)
-                }
-                
-                if let matches = matches, !matches.isEmpty {
-                    Text("Match results")
-                        .font(.headline)
-                        .padding(.top, 20)
-                    
-                    ForEach(matches) { match in
-                        MatchCard(match: match)
+
+                Section(header: Text("3. Opened by a Universal Link")) {
+                    if let link = model.openedLink {
+                        Row(label: "path", value: link.path)
+                        Row(label: "queryParams", value: describe(link.queryParams))
+                        Row(label: "fullPath", value: link.fullPath)
+                    } else {
+                        Text(model.openedLinkError ?? "Open a link on your DeepLinkNow domain to see it here")
                     }
                 }
             }
-            .padding(.horizontal, 20)
-        }
-        .onAppear {
-            setupDeepLinkObserver()
-        }
-    }
-    
-    private func setupDeepLinkObserver() {
-        NotificationCenter.default.addObserver(
-            forName: .init("DeepLinkReceived"),
-            object: nil,
-            queue: .main
-        ) { notification in
-            if let url = notification.object as? URL {
-                self.lastReceivedDeepLink = url
-            }
-        }
-    }
-    
-    private func initDln() {
-        Task {
-            let config = DLNConfig(apiKey: "web-test-api-key", enableLogs: true)
-            await DeepLinkNow.initialize(config: config)
-            await MainActor.run {
-                isInitialized = true
-            }
-        }
-    }
-    
-    private func checkClipboardForDeepLink() {
-        if let content = DeepLinkNow.checkClipboard() {
-            clipboardContent = content
-        }
-    }
-    
-    private func visitExternalDeeplinkPage() {
-        if let url = URL(string: "https://test-app.deeplinknow.com/sample-link?is_test=true&hello=world&otherParams=false") {
-            UIApplication.shared.open(url)
-        }
-    }
-    
-    private func findDeferredUser() {
-        Task {
-            if let response = await DeepLinkNow.findDeferredUser() {
-                await MainActor.run {
-                    self.matches = response.matches
-                }
-            }
+            .navigationTitle("DeepLinkNow")
         }
     }
 }
 
-struct MatchCard: View {
-    let match: Match
-    
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Confidence: \(String(format: "%.1f%%", match.confidenceScore))")
-                    .font(.system(size: 18, weight: .bold))
-                    .foregroundColor(.blue)
-            }
-            .padding(.bottom, 8)
-            .overlay(
-                Rectangle()
-                    .frame(height: 1)
-                    .foregroundColor(Color(.systemGray5)),
-                alignment: .bottom
-            )
-            
-            if let deeplink = match.deeplink {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Deeplink Info")
-                        .font(.system(size: 16, weight: .bold))
-                        .foregroundColor(Color(.darkText))
-                    
-                    Text("URL: \(deeplink.targetUrl)")
-                        .foregroundColor(.blue)
-                    
-                    if let campaignId = deeplink.campaignId {
-                        Text("Campaign: \(campaignId)")
-                            .foregroundColor(Color(.systemGray))
-                    }
-                    
-                    Text("Matched: \(formatDate(deeplink.matchedAt))")
-                        .font(.system(size: 12))
-                        .foregroundColor(Color(.systemGray2))
-                    
-                    Text("Expires: \(formatDate(deeplink.expiresAt))")
-                        .font(.system(size: 12))
-                        .foregroundColor(Color(.systemGray2))
-                }
-                .padding(.bottom, 16)
-            }
-            
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Match Details")
-                    .font(.system(size: 16, weight: .bold))
-                    .foregroundColor(Color(.darkText))
-                
-                MatchDetailRow(
-                    label: "IP Match",
-                    matched: match.matchDetails.ipMatch.matched,
-                    score: match.matchDetails.ipMatch.score
-                )
-                
-                MatchDetailRow(
-                    label: "Device Match",
-                    matched: match.matchDetails.deviceMatch.matched,
-                    score: match.matchDetails.deviceMatch.score
-                )
-                
-                MatchDetailRow(
-                    label: "Locale Match",
-                    matched: match.matchDetails.localeMatch.matched,
-                    score: match.matchDetails.localeMatch.score
-                )
-            }
-        }
-        .padding(16)
-        .background(Color.white)
-        .cornerRadius(10)
-        .shadow(
-            color: Color.black.opacity(0.25),
-            radius: 3.84,
-            x: 0,
-            y: 2
-        )
-    }
-    
-    private func formatDate(_ dateString: String) -> String {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime]
-        
-        if let date = formatter.date(from: dateString) {
-            let displayFormatter = DateFormatter()
-            displayFormatter.dateStyle = .medium
-            displayFormatter.timeStyle = .medium
-            return displayFormatter.string(from: date)
-        }
-        return dateString
-    }
-}
-
-struct MatchDetailRow: View {
+private struct Row: View {
     let label: String
-    let matched: Bool
-    let score: Double
-    
+    let value: String
+
     var body: some View {
-        HStack {
-            Text("\(label): \(matched ? "✓" : "✗")")
+        HStack(alignment: .firstTextBaseline) {
+            Text(label).fontWeight(.semibold)
             Spacer()
-            Text("Weight: \(String(format: "%.0f", score))")
+            Text(value).font(.system(.body, design: .monospaced)).multilineTextAlignment(.trailing)
         }
-        .padding(.vertical, 4)
-        .overlay(
-            Rectangle()
-                .frame(height: 1)
-                .foregroundColor(Color(.systemGray5)),
-            alignment: .bottom
-        )
     }
 }
 
 struct ContentView_Previews: PreviewProvider {
     static var previews: some View {
-        ContentView()
+        ContentView(model: DeepLinkModel())
     }
-} 
+}

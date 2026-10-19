@@ -1,48 +1,53 @@
-# DeepLinkNow Example
+# DeepLinkNow iOS example
 
-This example project demonstrates how to integrate and use the DeepLinkNow SDK in your iOS application.
+A SwiftUI app that shows the whole DeepLinkNow iOS integration. All SDK calls are in `DeepLinkNowExample/DeepLinkModel.swift`:
+
+1. `DeepLinkNow.initializeThrowing(config:)` at startup. It throws a `DeepLinkNowError`, which the screen shows.
+2. `DeepLinkNow.checkDeferredDeepLink(DLNDeferredOptions(minConfidence:))` once, on first launch. The screen shows `path`, `queryParams`, `fullPath`, `source`, `confidenceScore` and `matchQuality`. On iOS the SDK reads the pasteboard first (the landing page copied the link there; iOS 16+ may ask the user to allow pasting), then falls back to fingerprint matching.
+3. `DeepLinkNow.parseLink(_:)` for Universal Links that open the installed app (`DeepLinkNowExampleApp.swift`: `.onContinueUserActivity(NSUserActivityTypeBrowsingWeb)`).
+
+For testing, the screen also has a **minConfidence** picker (Off / 30 / 50 / 75), **Check again (force)** and **Reset deferred link** (`resetDeferredDeepLink()`).
 
 ## Requirements
 
-- iOS 13.0+
-- Xcode 13.0+
-- CocoaPods
+- Xcode 15+ (the project uses Xcode 16 folder-synchronised groups), CocoaPods
+- The SDK supports iOS 13+. The example app target is set to a recent iOS version.
 
-## Installation
+## Run
 
-1. Clone this repository
-2. Navigate to the Example directory
-3. Run `pod install`
-4. Open `DeepLinkNowExample.xcworkspace` in Xcode
-5. Replace `YOUR_APP_ID` in `AppDelegate.swift` with your actual DeepLinkNow app ID
-6. Build and run the project
+```bash
+cd packages/dln-ios/Example/DeepLinkNow
+pod install
+open DeepLinkNowExample.xcworkspace
+```
 
-## Features Demonstrated
+Or build from the command line:
 
-- SDK initialization
-- Deep link handling
-- Universal link handling
-- Deep link generation
-- Parameter passing
+```bash
+xcodebuild build -workspace DeepLinkNowExample.xcworkspace -scheme DeepLinkNowExample \
+  -destination 'platform=iOS Simulator,name=iPhone 17'
+```
 
-## Usage
+Replace `apiKey` in `DeepLinkModel.swift` with your app's key. `test_api_key` is DeepLinkNow's demo key and returns sample data.
 
-The example app shows:
+The project sets `ENABLE_USER_SCRIPT_SANDBOXING = NO`: CocoaPods' "Copy Pods Resources" script (which copies the SDK's privacy manifest bundle) can't run inside Xcode's script sandbox.
 
-1. How to initialize the SDK
-2. How to handle incoming deep links
-3. How to generate deep links
-4. How to handle universal links
-5. How to access deep link parameters
+### Universal Links
 
-## Testing Deep Links
+To open the app from your links, add the Associated Domains capability (Signing & Capabilities → + Capability → Associated Domains) with `applinks:{alias}.deeplinknow.com`, plus `applinks:{your custom domain}` if you have one. In the dashboard, set the app's Team ID and Bundle ID so DeepLinkNow serves a matching `apple-app-site-association`. This needs a signed build with your team.
 
-You can test deep links by:
+## Local SDK (default) vs published SDK
 
-1. Using the "Generate Test Deep Link" button in the app
-2. Opening a deep link from Safari or another app
-3. Testing universal links (requires proper domain configuration)
+Until DeepLinkNow 1.1.0 is published, the example builds the SDK from this repository. The `Podfile` has:
 
-## Support
+```ruby
+pod 'DeepLinkNow', :path => '../../'      # local source: packages/dln-ios
+```
 
-For any questions or issues, please contact support@deeplink.now
+After 1.1.0 is on CocoaPods trunk, switch to the published pod by replacing that line with:
+
+```ruby
+pod 'DeepLinkNow', '~> 1.1.0'
+```
+
+then run `pod install` again.

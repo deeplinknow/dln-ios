@@ -2,5 +2,8 @@ platform :ios, '13.0'
 use_frameworks!
 
 target 'DeepLinkNowExample' do
+  # Builds against the local SDK source in this repository (../../ = packages/dln-ios).
+  # SWITCH: after DeepLinkNow 1.1.0 is published to CocoaPods trunk, replace the next line with
+  #   pod 'DeepLinkNow', '~> 1.1.0'
   pod 'DeepLinkNow', :path => '../../'
-end 
+end

@@ -1,409 +1,519 @@
-import UIKit
 import Foundation
-import CoreTelephony
-import AdSupport
-import AppTrackingTransparency
+import UIKit
 
+/// DeepLinkNow iOS SDK. All members are static; internal state is lock-isolated (IOS-10).
+///
+/// Typical use:
+/// ```swift
+/// try await DeepLinkNow.initializeThrowing(config: DLNConfig(apiKey: "…"))
+/// if let link = try await DeepLinkNow.checkDeferredDeepLink() { route(link.path, link.queryParams) }
+/// ```
 public final class DeepLinkNow {
-    private static var shared: DeepLinkNow?
-    private let config: DLNConfig
-    private let urlSession: URLSessionProtocol
-    private let installTime: String
-    private var initResponse: InitResponse?
-    private var validDomains: Set<String> = []
-    
-    private init(config: DLNConfig, urlSession: URLSessionProtocol = URLSession.shared) {
-        self.config = config
-        self.urlSession = urlSession
-        self.installTime = ISO8601DateFormatter().string(from: Date())
-    }
-    
-    private func log(_ message: String, _ args: Any...) {
-        if config.enableLogs {
-            print("[DeepLinkNow]", message, args)
+
+    /// SDK version. Kept in sync with `DeepLinkNow.podspec` (IOS-01).
+    public static let sdkVersion = "1.1.0"
+
+    static let deferredCompletedKey = "com.deeplinknow.deferredCheckCompleted"
+    static let clipboardCheckedKey = "com.deeplinknow.clipboardChecked"
+
+    private init() {}
+
+    // MARK: - Internal state
+
+    /// A successfully initialized configuration. Immutable once built.
+    final class Client {
+        let api: APIClient
+        let appInfo: DLNAppInfo
+        let domains: Set<String>
+        let logger: Logger
+
+        init(api: APIClient, appInfo: DLNAppInfo, logger: Logger) {
+            self.api = api
+            self.appInfo = appInfo
+            self.domains = Set(appInfo.linkDomains)
+            self.logger = logger
         }
     }
 
-    private func warn(_ message: String) {
-        print("[DeepLinkNow] Warning:", message)
+    struct InFlightInit {
+        let id: UUID
+        let apiKey: String
+        let baseUrl: String
+        let task: Task<Client, Error>
     }
 
-    private func simpleHash(_ str: String) -> String {
-        var hash: Int = 0
-        for char in str.unicodeScalars {
-            hash = ((hash << 5) &- hash) &+ Int(char.value)
-            hash = hash & hash // Convert to 32bit integer
+    struct State {
+        var client: Client?
+        var initError: DeepLinkNowError?
+        var inFlight: InFlightInit?
+        var deferred: (id: UUID, task: Task<DLNDeferredDeepLink?, Error>)?
+        var enableLogs = false
+        /// SDK-83: only the first initialize of a process may use the device cache;
+        /// calling initialize again always asks the server (SDK-07).
+        var initCacheConsulted = false
+    }
+
+    /// Test seams. Production values are UIKit / `UserDefaults.standard` / `print`.
+    struct Environment {
+        var defaults: UserDefaults = .standard
+        var pasteboard: PasteboardSource = SystemPasteboard()
+        var logSink: (String) -> Void = { print($0) }
+        var retryDelayScale: Double = 1
+        var now: () -> Date = Date.init
+    }
+
+    static let state = Locked(State())
+    static let environment = Locked(Environment())
+
+    static var logger: Logger {
+        let enabled = state.withLock { $0.enableLogs }
+        let sink = environment.withLock { $0.logSink }
+        return Logger(enabled: enabled, sink: sink)
+    }
+
+    /// Clears all in-memory state (tests only).
+    static func resetForTesting() {
+        state.withLock { state in
+            state.inFlight?.task.cancel()
+            state.deferred?.task.cancel()
+            state = State()
         }
-        return String(hash, radix: 16)
     }
 
-    private func generateHardwareFingerprint(
-        platform: String,
-        osVersion: String,
-        screenWidth: Int,
-        screenHeight: Int,
-        pixelRatio: Double,
-        language: String,
-        timezone: String
-    ) -> String {
-        let components = [
-            platform,
-            osVersion,
-            String(screenWidth),
-            String(screenHeight),
-            String(pixelRatio),
-            language,
-            timezone
-        ]
+    // MARK: - Initialization (SDK-01…09, IOS-05…08)
 
-        let fingerprintString = components.joined(separator: "|")
-        return simpleHash(fingerprintString)
-    }
-    
+    /// Validates the API key and loads the app's link domains.
+    /// Failures are logged, not thrown; check `isInitialized` / `initializationError`,
+    /// or use `initializeThrowing(config:urlSession:)`.
     public static func initialize(config: DLNConfig, urlSession: URLSessionProtocol = URLSession.shared) async {
-        let instance = DeepLinkNow(config: config, urlSession: urlSession)
-        shared = instance
-        
-        instance.log("Initializing with config:", config)
-        
         do {
-            let initRequest = ["api_key": config.apiKey]
-            let data = try await instance.makeAPIRequest(
-                endpoint: "init",
-                method: "POST",
-                body: initRequest
-            )
-            
-            let decoder = JSONDecoder()
-            let response = try decoder.decode(InitResponse.self, from: data)
-            instance.initResponse = response
-            
-            // Set up base domains using app alias
-            let appAlias = response.app.alias
-            instance.validDomains.insert("\(appAlias).deeplinknow.com")
-            instance.validDomains.insert("\(appAlias).deeplink.now")
-            
-            // Add custom domains
-            response.app.customDomains
-                .filter { $0.domain != nil && $0.verified == true }
-                .forEach { domain in
-                    if let domain = domain.domain {
-                        instance.validDomains.insert(domain)
-                    }
-                }
-            
-            instance.log("Init response:", response)
-            instance.log("Valid domains:", instance.validDomains)
+            _ = try await initializeThrowing(config: config, urlSession: urlSession)
         } catch {
-            instance.warn("Initialization failed: \(error)")
+            logger.warn("Initialization failed: \(error)")
         }
     }
-    
-    public static func isValidDomain(_ domain: String) -> Bool {
-        guard let shared = shared else { return false }
-        return shared.validDomains.contains(domain)
-    }
-    
-    private func getFingerprint() -> Fingerprint {
-        let device = UIDevice.current
-        let screen = UIScreen.main
-        let dateFormatter = ISO8601DateFormatter()
 
-        let currentTime = dateFormatter.string(from: Date())
+    /// Validates the API key and loads the app's link domains, throwing a `DeepLinkNowError`
+    /// (`invalidApiKey`, `accountInactive`, `noCredits`, `rateLimited`, `network`, `server`,
+    /// `invalidResponse`, `invalidConfiguration`) on failure. A failure leaves `isInitialized == false`.
+    @discardableResult
+    public static func initializeThrowing(config: DLNConfig, urlSession: URLSessionProtocol = URLSession.shared) async throws -> DLNAppInfo {
+        let env = environment.current
+        let configLogger = Logger(enabled: config.enableLogs, sink: env.logSink)
 
-        // Generate user agent string that matches web format
-        let userAgent = "Mozilla/5.0 (\(device.model); CPU iOS \(device.systemVersion) like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/\(device.systemVersion) Mobile/15E148 Safari/604.1"
-
-        // Determine device model based on device type, matching web implementation
-        let deviceModel: String
-        switch device.userInterfaceIdiom {
-        case .pad:
-            deviceModel = "iPad"
-        case .phone:
-            deviceModel = "iPhone"
-        default:
-            deviceModel = "iPhone" // Default to iPhone for other cases
-        }
-
-        // Get screen dimensions in LOGICAL pixels (CSS pixels) to match web behavior
-        // window.screen.width on Safari iOS returns logical pixels, not physical
-        // Database analysis: production stores 393×852 (logical), not 1179×2556 (physical)
-        // Example: iPhone 14 Pro → bounds.width=393 (not 393×3=1179)
-        let screenWidth = Int(screen.bounds.width)
-        let screenHeight = Int(screen.bounds.height)
-        let pixelRatio = round(Double(screen.scale) * 100) / 100 // Round to 2 decimal places
-
-        // Get full locale identifier (e.g., "en-US" instead of just "en")
-        // Convert from underscore format (en_US) to hyphen format (en-US) to match web/RN
-        let language = Locale.current.identifier.replacingOccurrences(of: "_", with: "-")
-        let timezone = TimeZone.current.identifier
-
-        // Generate hardware fingerprint using the same algorithm as web
-        let hardwareFingerprint = generateHardwareFingerprint(
-            platform: "ios",
-            osVersion: device.systemVersion,
-            screenWidth: screenWidth,
-            screenHeight: screenHeight,
-            pixelRatio: pixelRatio,
-            language: language,
-            timezone: timezone
-        )
-
-        let metadata = FingerprintMetadata(
-            screenWidth: screenWidth,
-            screenHeight: screenHeight,
-            pixelRatio: pixelRatio,
-            colorDepth: 32, // Standard for iOS
-            isTablet: device.userInterfaceIdiom == .pad,
-            connectionType: nil,
-            cpuCores: ProcessInfo.processInfo.processorCount,
-            deviceMemory: nil,
-            source: "mobile"
-        )
-
-        return Fingerprint(
-            ipAddress: "", // Will be set by server
-            userAgent: userAgent,
-            platform: "ios",
-            osVersion: device.systemVersion,
-            deviceModel: deviceModel,
-            language: language,
-            timezone: timezone,
-            installedAt: installTime,
-            lastOpenedAt: currentTime,
-            deviceId: device.identifierForVendor?.uuidString,
-            advertisingId: {
-                if #available(iOS 14, *) {
-                    return ATTrackingManager.trackingAuthorizationStatus == .authorized ?
-                        ASIdentifierManager.shared().advertisingIdentifier.uuidString : nil
-                } else {
-                    return ASIdentifierManager.shared().isAdvertisingTrackingEnabled ?
-                        ASIdentifierManager.shared().advertisingIdentifier.uuidString : nil
-                }
-            }(),
-            vendorId: device.identifierForVendor?.uuidString,
-            hardwareFingerprint: hardwareFingerprint,
-            metadata: metadata
-        )
-    }
-    
-    public static func findDeferredUser() async -> MatchResponse? {
-        guard let shared = shared else {
-            print("[DeepLinkNow] SDK not initialized. Call initialize() first")
-            return nil
-        }
-        
-        shared.log("Finding deferred user...")
-        
-        let fingerprint = shared.getFingerprint()
-        
-        // Break down the metadata dictionary creation
-        var metadata: [String: Any] = [:]
-        if let fingerprintMetadata = fingerprint.metadata {
-            metadata["screen_width"] = fingerprintMetadata.screenWidth
-            metadata["screen_height"] = fingerprintMetadata.screenHeight
-            if let pixelRatio = fingerprintMetadata.pixelRatio {
-                // Ensure the number is properly formatted for JSON
-                let roundedRatio = NSNumber(value: round(pixelRatio * 100) / 100)
-                metadata["pixel_ratio"] = roundedRatio
-            }
-            metadata["color_depth"] = fingerprintMetadata.colorDepth
-            metadata["is_tablet"] = fingerprintMetadata.isTablet
-            metadata["connection_type"] = fingerprintMetadata.connectionType
-            metadata["cpu_cores"] = fingerprintMetadata.cpuCores
-            metadata["device_memory"] = fingerprintMetadata.deviceMemory
-            metadata["source"] = fingerprintMetadata.source
-        }
-        
-        // Create the main fingerprint dictionary
-        var fingerprintDict: [String: Any] = [:]
-        fingerprintDict["platform"] = fingerprint.platform
-        fingerprintDict["os_version"] = fingerprint.osVersion
-        fingerprintDict["device_model"] = fingerprint.deviceModel
-        fingerprintDict["language"] = fingerprint.language
-        fingerprintDict["timezone"] = fingerprint.timezone
-        fingerprintDict["installed_at"] = fingerprint.installedAt
-        fingerprintDict["last_opened_at"] = fingerprint.lastOpenedAt
-        fingerprintDict["device_id"] = fingerprint.deviceId ?? ""
-        fingerprintDict["advertising_id"] = fingerprint.advertisingId ?? ""
-        fingerprintDict["vendor_id"] = fingerprint.vendorId ?? ""
-        fingerprintDict["hardware_fingerprint"] = fingerprint.hardwareFingerprint ?? ""
-        fingerprintDict["user_agent"] = fingerprint.userAgent
-
-        // Move screen dimensions to top level for API matching (required by match endpoint schema)
-        if let fingerprintMetadata = fingerprint.metadata {
-            fingerprintDict["screen_width"] = fingerprintMetadata.screenWidth
-            fingerprintDict["screen_height"] = fingerprintMetadata.screenHeight
-            if let pixelRatio = fingerprintMetadata.pixelRatio {
-                fingerprintDict["pixel_ratio"] = pixelRatio
-            }
-        }
-
-        fingerprintDict["metadata"] = metadata
-        
-        let matchRequest = ["fingerprint": fingerprintDict]
-        
-        shared.log("Sending match request:", matchRequest)
-        
+        let api: APIClient
         do {
-            let data = try await shared.makeAPIRequest(
-                endpoint: "match",
-                method: "POST",
-                body: matchRequest
-            )
-            
-            let decoder = JSONDecoder()
-            let response = try decoder.decode(MatchResponse.self, from: data)
-            shared.log("Match response:", response)
-            return response
-            
+            api = try APIClient(config: config, session: urlSession, logger: configLogger, delayScale: env.retryDelayScale)
         } catch {
-            shared.warn("API request failed: \(error)")
-            return nil
+            let dlnError = (error as? DeepLinkNowError) ?? DeepLinkNowError(.invalidConfiguration, underlying: error)
+            state.withLock { s in
+                s.inFlight?.task.cancel()
+                s.inFlight = nil
+                s.client = nil
+                s.initError = dlnError
+                s.enableLogs = config.enableLogs
+            }
+            throw dlnError
         }
-    }
-    
-    private func makeAPIRequest(endpoint: String, method: String = "GET", body: [String: Any]? = nil) async throws -> Data {
-        let baseUrl = config.baseUrl ?? "https://deeplinknow.com"
-        let url = URL(string: "\(baseUrl)/api/v1/sdk/\(endpoint)")!
-        
-        var request = URLRequest(url: url)
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(config.apiKey, forHTTPHeaderField: "x-api-key")
-        request.httpMethod = method
-        
-        if let timeout = config.timeout {
-            request.timeoutInterval = timeout
+
+        // Share an identical in-flight request (SDK-07), otherwise start a new one that supersedes it.
+        let (id, task): (UUID, Task<Client, Error>) = state.withLock { s in
+            s.enableLogs = config.enableLogs
+            if let current = s.inFlight, current.apiKey == api.apiKey, current.baseUrl == api.baseUrl {
+                return (current.id, current.task)
+            }
+            let id = UUID()
+            let task = Task<Client, Error> { try await performInit(api: api, logger: configLogger) }
+            s.inFlight = InFlightInit(id: id, apiKey: api.apiKey, baseUrl: api.baseUrl, task: task)
+            return (id, task)
         }
-        
-        if let body = body {
-            request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        }
-        
-        let (data, response) = try await urlSession.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            log("API request failed: Invalid response type")
-            throw DLNError.serverError("Invalid response type", nil, nil)
-        }
-        
-        if !(200...299).contains(httpResponse.statusCode) {
-            log("API request failed: \(httpResponse.statusCode)")
-            if let errorString = String(data: data, encoding: .utf8) {
-                log("Error response: \(errorString)")
-                
-                // Try to decode error response
-                if let errorResponse = try? JSONDecoder().decode([String: String].self, from: data) {
-                    throw DLNError.serverError(
-                        errorResponse["error"] ?? "Unknown error",
-                        errorResponse["status"],
-                        errorResponse["details"]
-                    )
+
+        do {
+            let client = try await task.value
+            state.withLock { s in
+                if s.inFlight?.id == id {
+                    s.inFlight = nil
+                    s.client = client
+                    s.initError = nil
                 }
             }
-            
-            // Map status codes to specific errors
-            switch httpResponse.statusCode {
-            case 400: throw DLNError.badRequest
-            case 401: throw DLNError.unauthorized
-            case 403: throw DLNError.forbidden
-            case 404: throw DLNError.notFound
-            case 429: throw DLNError.tooManyRequests
-            case 500: throw DLNError.internalServerError
-            default: throw DLNError.serverError("Unknown error", String(httpResponse.statusCode), nil)
+            return client.appInfo
+        } catch {
+            let dlnError = (error as? DeepLinkNowError) ?? DeepLinkNowError(.network, underlying: error)
+            state.withLock { s in
+                if s.inFlight?.id == id {
+                    s.inFlight = nil
+                    s.client = nil
+                    s.initError = dlnError
+                }
+            }
+            throw dlnError
+        }
+    }
+
+    private static func performInit(api: APIClient, logger: Logger) async throws -> Client {
+        let env = environment.current
+        // SDK-83: a cold start within 24 hours of the last /init (same UTC month) reuses it.
+        let firstInProcess = state.withLock { s -> Bool in
+            defer { s.initCacheConsulted = true }
+            return !s.initCacheConsulted
+        }
+        if firstInProcess,
+           let cached = InitCache.load(from: env.defaults),
+           cached.isUsable(apiKey: api.apiKey, baseUrl: api.baseUrl, now: env.now()) {
+            logger.debug("Initialized app \(cached.alias) from the device cache (no /init request)")
+            return Client(api: api, appInfo: cached.appInfo, logger: logger)
+        }
+
+        logger.debug("Initializing (key \(Logger.mask(api.apiKey)), baseUrl \(api.baseUrl))")
+        // BILL-20: send the IDFV (same value as /match device_id) so MAU is counted per device.
+        // FP-21: say which SDK is counting.
+        let deviceId = await MainActor.run { UIDevice.current.identifierForVendor?.uuidString }
+        let data: Data
+        do {
+            data = try await api.post("init", body: [
+                "device_id": deviceId ?? NSNull(),
+                "sdk": "ios/\(sdkVersion)",
+            ])
+        } catch let error as DeepLinkNowError where error.code == .invalidApiKey || error.code == .accountInactive {
+            InitCache.clear(in: env.defaults)
+            throw error
+        }
+        let response: InitResponse
+        do {
+            response = try JSONDecoder().decode(InitResponse.self, from: data)
+        } catch {
+            throw DeepLinkNowError(.invalidResponse, statusCode: 200, message: "Unexpected /init response", underlying: error)
+        }
+        let alias = response.app.alias.lowercased()
+        guard !alias.isEmpty else {
+            throw DeepLinkNowError(.invalidResponse, statusCode: 200, message: "Missing app alias")
+        }
+        var domains = ["\(alias).deeplinknow.com"]
+        let custom = (response.app.customDomains ?? [])
+            .filter { $0.verified == true }
+            .compactMap { $0.domain.map(LinkParsing.normalizeHost) }
+            .filter { !$0.isEmpty }
+        for domain in custom where !domains.contains(domain) { domains.append(domain) }
+
+        let info = DLNAppInfo(
+            appId: response.app.id,
+            alias: alias,
+            name: response.app.name,
+            linkDomains: domains,
+            primaryDomain: custom.first ?? domains[0],
+            accountStatus: response.account.status.rawValue,
+            creditsRemaining: response.account.creditsRemaining
+        )
+        logger.debug("Initialized app \(alias); link domains: \(domains.joined(separator: ", "))")
+        InitCache(apiKey: api.apiKey, baseUrl: api.baseUrl, savedAt: env.now(), appInfo: info).save(to: env.defaults)
+        return Client(api: api, appInfo: info, logger: logger)
+    }
+
+    /// `true` once an initialization has succeeded (and no later one has failed).
+    public static var isInitialized: Bool {
+        state.withLock { $0.client != nil }
+    }
+
+    /// The error the most recent initialization failed with, or `nil`.
+    public static var initializationError: DeepLinkNowError? {
+        state.withLock { $0.initError }
+    }
+
+    /// App info from the last successful initialization.
+    public static var appInfo: DLNAppInfo? {
+        state.withLock { $0.client?.appInfo }
+    }
+
+    /// Waits for an in-flight init (SDK-06), else returns the current client or throws `.notInitialized`.
+    static func requireClient() async throws -> Client {
+        let snapshot = state.withLock { s in (s.inFlight?.task, s.client, s.initError) }
+        if let task = snapshot.0 {
+            do {
+                return try await task.value
+            } catch {
+                let cause = (error as? DeepLinkNowError) ?? DeepLinkNowError(.network, underlying: error)
+                throw DeepLinkNowError(.notInitialized, message: "Initialization failed", underlying: cause)
             }
         }
-        
-        return data
+        if let client = snapshot.1 { return client }
+        throw DeepLinkNowError(.notInitialized, message: "Call initialize() first", underlying: snapshot.2)
     }
-    
-    public static func hasDeepLinkToken() -> Bool {
-        guard shared != nil else {
-            print("[DeepLinkNow] SDK not initialized. Call initialize() first")
-            return false
-        }
-        
-        guard UIPasteboard.general.hasStrings else {
-            return false
-        }
-        
-        if let content = UIPasteboard.general.string {
-            return content.hasPrefix("dln://") || 
-                   content.contains("deeplinknow.com") || 
-                   content.contains("deeplink.now")
-        }
-        
-        return false
+
+    /// The trusted domains: the app's link domains after a successful init, `nil` before (provisional rule).
+    static var currentDomains: Set<String>? {
+        state.withLock { $0.client?.domains }
     }
-    
-    public static func checkClipboard() -> String? {
-        guard let shared = shared else {
-            print("[DeepLinkNow] SDK not initialized. Call initialize() first")
-            return nil
+
+    // MARK: - Deferred deep link (SDK-10…27, IOS-15/18)
+
+    /// The one call: returns the deferred deep link on the first launch after install.
+    ///
+    /// Chain: pasteboard (when `useClipboard`) → fingerprint `/match`. Returns `nil` when nothing
+    /// was found, or on any launch after a definitive outcome (unless `force`). Throws
+    /// `DeepLinkNowError` on failure (`.notInitialized`, `.network`, …); errors do not consume the
+    /// first launch, so a later call retries.
+    public static func checkDeferredDeepLink(_ options: DLNDeferredOptions = DLNDeferredOptions()) async throws -> DLNDeferredDeepLink? {
+        let (id, task): (UUID, Task<DLNDeferredDeepLink?, Error>) = state.withLock { s in
+            if let current = s.deferred { return (current.id, current.task) }
+            let id = UUID()
+            let task = Task<DLNDeferredDeepLink?, Error> { try await runDeferredChain(options) }
+            s.deferred = (id, task)
+            return (id, task)
         }
-        
-        guard let content = UIPasteboard.general.string else {
-            return nil
-        }
-        
-        // Parse domain from URL
-        if let urlComponents = URLComponents(string: content),
-           let host = urlComponents.host {
-            if host.contains("deeplinknow.com") ||
-               host.contains("deeplink.now") ||
-               shared.validDomains.contains(host) {
-                shared.log("Found deep link token in clipboard")
-                shared.log("Clipboard content:", content)
-                return content
+        defer {
+            state.withLock { s in
+                if s.deferred?.id == id { s.deferred = nil }
             }
         }
-        
+        return try await task.value
+    }
+
+    /// Clears the first-launch flag so the next `checkDeferredDeepLink` runs the chain again (SDK-26).
+    public static func resetDeferredDeepLink() {
+        let defaults = environment.withLock { $0.defaults }
+        defaults.removeObject(forKey: deferredCompletedKey)
+        defaults.removeObject(forKey: clipboardCheckedKey)
+        InitCache.clear(in: defaults)
+        state.withLock { s in
+            s.deferred = nil
+        }
+        logger.debug("Deferred deep link state reset")
+    }
+
+    private static func runDeferredChain(_ options: DLNDeferredOptions) async throws -> DLNDeferredDeepLink? {
+        let client = try await requireClient()
+        let log = client.logger
+        let env = environment.current
+        let defaults = env.defaults
+
+        if !options.force && defaults.bool(forKey: deferredCompletedKey) {
+            log.debug("checkDeferredDeepLink: already completed on an earlier launch; returning nil")
+            return nil
+        }
+
+        // 1. Pasteboard (SDK-12, IOS-27): at most one read per install unless forced.
+        if options.useClipboard && (options.force || !defaults.bool(forKey: clipboardCheckedKey)) {
+            let likely = await env.pasteboard.probablyContainsWebURL()
+            if likely == false {
+                log.debug("checkDeferredDeepLink: clipboard has no web URL (not read)")
+            } else {
+                let text = await env.pasteboard.readString()
+                defaults.set(true, forKey: clipboardCheckedKey)
+                if let text = text, let parsed = validatedClipboardLink(text, domains: client.domains) {
+                    log.debug("checkDeferredDeepLink: clipboard hit \(parsed.url)")
+                    defaults.set(true, forKey: deferredCompletedKey)
+                    return DLNDeferredDeepLink(
+                        path: parsed.path, queryParams: parsed.queryParams, fullPath: parsed.fullPath,
+                        url: parsed.url, source: .clipboard, confidenceScore: 100, matchQuality: .high,
+                        deeplinkId: nil, targetUrl: nil, campaignId: nil, metadata: nil,
+                        matchedAt: nil, expiresAt: nil, matchDetails: nil)
+                }
+                log.debug("checkDeferredDeepLink: clipboard has no DLN link")
+            }
+        }
+
+        // 2. Fingerprint (SDK-13/14). Errors propagate and leave the flag unset (SDK-24).
+        let response: MatchResponse
+        do {
+            response = try await fetchMatches(client)
+        } catch {
+            log.debug("checkDeferredDeepLink: /match failed (\((error as? DeepLinkNowError)?.code.rawValue ?? "error"))")
+            throw error
+        }
+        defaults.set(true, forKey: deferredCompletedKey)
+        for match in response.matches {
+            guard let deeplink = match.deeplink else { continue }
+            if let min = options.minConfidence, match.confidenceScore < min { continue }
+            log.debug("checkDeferredDeepLink: fingerprint match \(match.confidenceScore) \(match.matchQuality.rawValue)")
+            return makeDeferred(from: match, deeplink: deeplink, client: client)
+        }
+        log.debug("checkDeferredDeepLink: no eligible fingerprint candidate (\(response.matches.count) returned)")
         return nil
     }
-    
-    public static func handleUniversalLink(_ url: URL) {
-        // Handle universal links
+
+    /// SDK-17/18/19.
+    static func makeDeferred(from match: Match, deeplink: DeeplinkMatch, client: Client) -> DLNDeferredDeepLink {
+        let fullPath: String
+        if let serverFullPath = deeplink.fullPath, !serverFullPath.isEmpty {
+            fullPath = serverFullPath.hasPrefix("/") ? serverFullPath : "/" + serverFullPath
+        } else if deeplink.targetUrl.isEmpty {
+            fullPath = "/"
+        } else if let absolute = URLComponents(string: deeplink.targetUrl),
+                  let scheme = absolute.scheme?.lowercased(), scheme == "https" || scheme == "http", absolute.host != nil {
+            // Absolute dashboard target: use its path + query.
+            let path = absolute.percentEncodedPath.isEmpty ? "/" : absolute.percentEncodedPath
+            let query = absolute.percentEncodedQuery ?? ""
+            fullPath = query.isEmpty ? path : path + "?" + query
+        } else {
+            // On-demand links store `promo?code=…` without the leading slash (SDK-17).
+            fullPath = deeplink.targetUrl.hasPrefix("/") ? deeplink.targetUrl : "/" + deeplink.targetUrl
+        }
+        let queryParams = deeplink.queryParams ?? LinkParsing.parseQuery(LinkParsing.query(fromFullPath: fullPath)).0
+
+        let url: String
+        if let target = URLComponents(string: deeplink.targetUrl),
+           let scheme = target.scheme?.lowercased(), scheme == "https" || scheme == "http",
+           let host = target.host, LinkParsing.isAllowedHost(host, domains: client.domains) {
+            url = deeplink.targetUrl
+        } else {
+            url = "https://\(client.appInfo.primaryDomain)\(fullPath)"
+        }
+
+        return DLNDeferredDeepLink(
+            path: LinkParsing.path(fromFullPath: fullPath),
+            queryParams: queryParams,
+            fullPath: fullPath,
+            url: url,
+            source: .fingerprint,
+            confidenceScore: match.confidenceScore,
+            matchQuality: match.matchQuality,
+            deeplinkId: deeplink.id,
+            targetUrl: deeplink.targetUrl,
+            campaignId: deeplink.campaignId,
+            metadata: deeplink.metadata,
+            matchedAt: deeplink.matchedAt.isEmpty ? nil : deeplink.matchedAt,
+            expiresAt: deeplink.expiresAt.isEmpty ? nil : deeplink.expiresAt,
+            matchDetails: match.matchDetails)
     }
-    
-    public static func handleCustomScheme(_ url: URL) {
-        // Handle custom scheme deep links
+
+    // MARK: - Fingerprint matching (SDK-20/21/22)
+
+    /// All fingerprint candidates from `/api/v1/sdk/match`, unfiltered and in server order.
+    /// Returns `nil` when not initialized or on any error; prefer `findDeferredUserThrowing()`
+    /// or `checkDeferredDeepLink()`.
+    public static func findDeferredUser() async -> MatchResponse? {
+        do {
+            return try await findDeferredUserThrowing()
+        } catch let error as DeepLinkNowError where error.code == .notInitialized {
+            logger.warn("SDK not initialized. Call initialize() first")
+            return nil
+        } catch {
+            logger.warn("findDeferredUser failed: \(error)")
+            return nil
+        }
     }
-    
+
+    /// All fingerprint candidates from `/api/v1/sdk/match`, unfiltered and in server order.
+    /// Zero matches is an empty response, not an error. Throws `DeepLinkNowError`.
+    public static func findDeferredUserThrowing() async throws -> MatchResponse {
+        let client = try await requireClient()
+        return try await fetchMatches(client)
+    }
+
+    private static func fetchMatches(_ client: Client) async throws -> MatchResponse {
+        let snapshot = await MainActor.run { DeviceSnapshot.current() }
+        let body = DeviceFingerprint.body(snapshot: snapshot)
+        client.logger.debug("Sending match request")
+        let data = try await client.api.post("match", body: body)
+        do {
+            let response = try JSONDecoder().decode(MatchResponse.self, from: data)
+            client.logger.debug("Match response: \(response.matches.count) candidate(s)")
+            return response
+        } catch {
+            throw DeepLinkNowError(.invalidResponse, statusCode: 200, message: "Unexpected /match response", underlying: error)
+        }
+    }
+
+    // MARK: - Pasteboard (SDK-40…45, IOS-25…27)
+
+    /// Cheap "is there probably a link on the pasteboard" check. Never reads the content, so it
+    /// never shows the paste prompt (`hasURLs || hasStrings`). `true` means "worth calling
+    /// `checkClipboard()`", not "verified".
+    public static func hasDeepLinkToken() -> Bool {
+        guard isInitialized else {
+            logger.warn("SDK not initialized. Call initialize() first")
+            return false
+        }
+        return environment.withLock { $0.pasteboard }.hasContentWithoutReading()
+    }
+
+    /// Like `hasDeepLinkToken()`, but uses `detectPatterns(for: [.probableWebURL])` on iOS 14+.
+    /// Never reads the content.
+    public static func hasDeepLinkTokenAsync() async -> Bool {
+        guard isInitialized else { return false }
+        let board = environment.withLock { $0.pasteboard }
+        if let likely = await board.probablyContainsWebURL() { return likely }
+        return board.hasContentWithoutReading()
+    }
+
+    /// Returns the pasteboard text when it is exactly one link on the app's domains, else `nil`.
+    /// Reads `UIPasteboard.general.string` (may show the iOS 16+ paste prompt).
+    public static func checkClipboard() -> String? {
+        guard let domains = currentDomains else {
+            logger.warn("SDK not initialized. Call initialize() first")
+            return nil
+        }
+        let board = environment.withLock { $0.pasteboard }
+        guard let text = board.readStringSync(),
+              let parsed = validatedClipboardLink(text, domains: domains) else {
+            return nil
+        }
+        logger.debug("Found DLN link on the pasteboard: \(parsed.url)")
+        return parsed.url
+    }
+
+    /// SDK-40: trimmed, a single absolute URL, passing the host rule.
+    static func validatedClipboardLink(_ text: String, domains: Set<String>?) -> LinkParsing.Parsed? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.rangeOfCharacter(from: .whitespacesAndNewlines) == nil else { return nil }
+        return LinkParsing.parse(trimmed, domains: domains)
+    }
+
+    // MARK: - Parsing (SDK-30…38, IOS-28)
+
+    /// `true` when `domain` (a host) is one of the app's link domains (SDK-31). Before a successful
+    /// init, any non-reserved `{alias}.deeplinknow.com` host is accepted provisionally (SDK-37).
+    public static func isValidDomain(_ domain: String) -> Bool {
+        LinkParsing.isAllowedHost(domain, domains: currentDomains)
+    }
+
+    /// Parses a Universal Link on the app's domains: undecoded `path`, `queryParams`
+    /// (string / flag / list), `fullPath`, `url`. Returns `nil` for any other URL.
+    public static func parseLink(_ url: URL) -> DLNParsedLink? {
+        guard let parsed = LinkParsing.parse(url: url, domains: currentDomains) else { return nil }
+        return DLNParsedLink(path: parsed.path, queryParams: parsed.queryParams, fullPath: parsed.fullPath, url: parsed.url)
+    }
+
+    /// Tuple form of `parseLink(_:)`. `path` is not decoded; parameter values are `String`,
+    /// `true` (flag, `?k` / `?k=`) or `[String]` (repeated key).
+    public static func parseDeepLink(_ url: URL) -> (path: String, parameters: [String: Any])? {
+        guard let link = parseLink(url) else { return nil }
+        return (link.path, link.parameters)
+    }
+
+    /// Builds an https link on the app's primary link domain that `parseLink` round-trips (IOS-29).
+    /// Returns `nil` before a successful initialization.
     public static func createDeepLink(
         path: String,
         customParameters: DLNCustomParameters? = nil
     ) -> URL? {
-        let components = URLComponents {
-            $0.scheme = "deeplinknow"
-            $0.host = "app"
-            $0.path = path
-            
-            if let params = customParameters?.dictionary {
-                $0.queryItems = params.compactMap { key, value in
-                    URLQueryItem(name: key, value: String(describing: value))
-                }
-            }
+        guard let info = appInfo else { return nil }
+        var encodedPath = path.hasPrefix("/") ? path : "/" + path
+        encodedPath = encodedPath.addingPercentEncoding(withAllowedCharacters: LinkParsing.pathAllowed) ?? encodedPath
+        var string = "https://\(info.primaryDomain)\(encodedPath)"
+        if let params = customParameters?.dictionary, !params.isEmpty {
+            let query = params.keys.sorted().map { key in
+                "\(LinkParsing.encodeQueryComponent(key))=\(LinkParsing.encodeQueryComponent(params[key] ?? ""))"
+            }.joined(separator: "&")
+            string += "?" + query
         }
-        
-        return components.url
+        return URL(string: string)
     }
-    
-    public static func parseDeepLink(_ url: URL) -> (path: String, parameters: [String: Any])? {
-        guard let shared = shared,
-              let components = URLComponents(url: url, resolvingAgainstBaseURL: true),
-              shared.validDomains.contains(components.host ?? "") else {
-            return nil
-        }
-        
-        let path = components.path
-        var parameters: [String: Any] = [:]
-        
-        // Parse query parameters
-        components.queryItems?.forEach { item in
-            if let value = item.value {
-                parameters[item.name] = value
-            }
-        }
-        
-        return (path, parameters)
+
+    // MARK: - Deprecated link handlers (IOS-31)
+
+    /// Parses a Universal Link; same as `parseLink(_:)`.
+    @available(*, deprecated, renamed: "parseLink(_:)")
+    @discardableResult
+    public static func handleUniversalLink(_ url: URL) -> DLNParsedLink? {
+        parseLink(url)
     }
-} 
+
+    /// Not supported: DLN links are https Universal Links. Custom URL schemes belong to the app.
+    /// Does nothing; route custom-scheme URLs in your app.
+    @available(*, deprecated, message: "Custom URL schemes are not supported by DeepLinkNow. Use Universal Links and parseLink(_:).")
+    public static func handleCustomScheme(_ url: URL) {
+        logger.debug("handleCustomScheme is not supported; ignoring \(url.scheme ?? "")://")
+    }
+}

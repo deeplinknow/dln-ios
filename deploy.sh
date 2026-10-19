@@ -56,12 +56,15 @@ if grep -q "version:" Package.swift; then
   sed -i '' "s/version:[[:space:]]*\".*\"/version: \"$NEW_VERSION\"/g" Package.swift
 fi
 
+# Update the version constant in the source (DeepLinkNow.sdkVersion)
+sed -i '' "s/sdkVersion = \".*\"/sdkVersion = \"$NEW_VERSION\"/" Sources/DeepLinkNow/DeepLinkNow.swift
+
 # Update version in README.md
 sed -i '' "s/Version.*svg/Version](https:\/\/img.shields.io\/cocoapods\/v\/DeepLinkNow.svg/g" README.md
 
 # Git operations
 echo "Committing changes..."
-git add DeepLinkNow.podspec Package.swift README.md
+git add DeepLinkNow.podspec Package.swift README.md Sources/DeepLinkNow/DeepLinkNow.swift
 git commit -m "$COMMIT_MESSAGE: $NEW_VERSION"
 
 # Tag the release

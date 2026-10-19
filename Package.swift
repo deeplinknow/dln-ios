@@ -16,12 +16,15 @@ let package = Package(
         .target(
             name: "DeepLinkNow",
             dependencies: [],
+            resources: [
+                .copy("Resources/PrivacyInfo.xcprivacy")
+            ],
             linkerSettings: [
-                .linkedFramework("CoreTelephony"),
-                .linkedFramework("AdSupport")
+                .linkedFramework("UIKit"),
+                .linkedFramework("Foundation")
             ]),
         .testTarget(
             name: "DeepLinkNowTests",
             dependencies: ["DeepLinkNow"]),
     ]
-) 
+)
