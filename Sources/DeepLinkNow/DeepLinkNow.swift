@@ -11,7 +11,7 @@ import UIKit
 public final class DeepLinkNow {
 
     /// SDK version. Kept in sync with `DeepLinkNow.podspec` (IOS-01).
-    public static let sdkVersion = "1.1.0"
+    public static let sdkVersion = "1.2.0"
 
     static let deferredCompletedKey = "com.deeplinknow.deferredCheckCompleted"
     static let clipboardCheckedKey = "com.deeplinknow.clipboardChecked"
@@ -51,6 +51,35 @@ public final class DeepLinkNow {
         /// SDK-83: only the first initialize of a process may use the device cache;
         /// calling initialize again always asks the server (SDK-07).
         var initCacheConsulted = false
+        /// SDK-85: the last failure of an everyday call, and which kind of call it came from.
+        var lastError: DeepLinkNowError?
+        var lastErrorKind: CallKind?
+    }
+
+    /// SDK-85: the kinds of call that set and clear `lastError`.
+    enum CallKind {
+        case initialize, deferredDeepLink, findDeferredUser
+    }
+
+    /// SDK-85: records a failure in `lastError` and returns it as a `DeepLinkNowError`.
+    @discardableResult
+    static func recordFailure(_ error: Error, kind: CallKind) -> DeepLinkNowError {
+        let dlnError = (error as? DeepLinkNowError) ?? DeepLinkNowError(.network, underlying: error)
+        state.withLock { s in
+            s.lastError = dlnError
+            s.lastErrorKind = kind
+        }
+        return dlnError
+    }
+
+    /// SDK-85: a success clears `lastError` when it came from the same kind of call.
+    static func recordSuccess(kind: CallKind) {
+        state.withLock { s in
+            if s.lastErrorKind == kind {
+                s.lastError = nil
+                s.lastErrorKind = nil
+            }
+        }
     }
 
     /// Test seams. Production values are UIKit / `UserDefaults.standard` / `print`.
@@ -83,8 +112,8 @@ public final class DeepLinkNow {
     // MARK: - Initialization (SDK-01…09, IOS-05…08)
 
     /// Validates the API key and loads the app's link domains.
-    /// Failures are logged, not thrown; check `isInitialized` / `initializationError`,
-    /// or use `initializeThrowing(config:urlSession:)`.
+    /// Failures are logged, not thrown (SDK-85); check `isInitialized` / `initializationError` /
+    /// `lastError`, or use `initializeThrowing(config:urlSession:)`.
     public static func initialize(config: DLNConfig, urlSession: URLSessionProtocol = URLSession.shared) async {
         do {
             _ = try await initializeThrowing(config: config, urlSession: urlSession)
@@ -96,8 +125,19 @@ public final class DeepLinkNow {
     /// Validates the API key and loads the app's link domains, throwing a `DeepLinkNowError`
     /// (`invalidApiKey`, `accountInactive`, `noCredits`, `rateLimited`, `network`, `server`,
     /// `invalidResponse`, `invalidConfiguration`) on failure. A failure leaves `isInitialized == false`.
+    /// The error is also recorded in `lastError` (SDK-85).
     @discardableResult
     public static func initializeThrowing(config: DLNConfig, urlSession: URLSessionProtocol = URLSession.shared) async throws -> DLNAppInfo {
+        do {
+            let info = try await performInitialize(config: config, urlSession: urlSession)
+            recordSuccess(kind: .initialize)
+            return info
+        } catch {
+            throw recordFailure(error, kind: .initialize)
+        }
+    }
+
+    private static func performInitialize(config: DLNConfig, urlSession: URLSessionProtocol) async throws -> DLNAppInfo {
         let env = environment.current
         let configLogger = Logger(enabled: config.enableLogs, sink: env.logSink)
 
@@ -169,16 +209,10 @@ public final class DeepLinkNow {
         // BILL-20: send the IDFV (same value as /match device_id) so MAU is counted per device.
         // FP-21: say which SDK is counting.
         let deviceId = await MainActor.run { UIDevice.current.identifierForVendor?.uuidString }
-        let data: Data
-        do {
-            data = try await api.post("init", body: [
-                "device_id": deviceId ?? NSNull(),
-                "sdk": "ios/\(sdkVersion)",
-            ])
-        } catch let error as DeepLinkNowError where error.code == .invalidApiKey || error.code == .accountInactive {
-            InitCache.clear(in: env.defaults)
-            throw error
-        }
+        let data = try await post(api, "init", body: [
+            "device_id": deviceId ?? NSNull(),
+            "sdk": "ios/\(sdkVersion)",
+        ])
         let response: InitResponse
         do {
             response = try JSONDecoder().decode(InitResponse.self, from: data)
@@ -220,6 +254,14 @@ public final class DeepLinkNow {
         state.withLock { $0.initError }
     }
 
+    /// SDK-85: the typed error (SDK-55) from the most recent failed `initialize` /
+    /// `initializeThrowing`, `checkDeferredDeepLink` / `checkDeferredDeepLinkThrowing` or
+    /// `findDeferredUser` / `findDeferredUserThrowing`, or `nil`. The next successful call of
+    /// the same kind clears it.
+    public static var lastError: DeepLinkNowError? {
+        state.withLock { $0.lastError }
+    }
+
     /// App info from the last successful initialization.
     public static var appInfo: DLNAppInfo? {
         state.withLock { $0.client?.appInfo }
@@ -250,10 +292,36 @@ public final class DeepLinkNow {
     /// The one call: returns the deferred deep link on the first launch after install.
     ///
     /// Chain: pasteboard (when `useClipboard`) → fingerprint `/match`. Returns `nil` when nothing
-    /// was found, or on any launch after a definitive outcome (unless `force`). Throws
-    /// `DeepLinkNowError` on failure (`.notInitialized`, `.network`, …); errors do not consume the
-    /// first launch, so a later call retries.
-    public static func checkDeferredDeepLink(_ options: DLNDeferredOptions = DLNDeferredOptions()) async throws -> DLNDeferredDeepLink? {
+    /// was found, or on any launch after a definitive outcome (unless `force`).
+    ///
+    /// Never throws (SDK-85): a failure (`.notInitialized`, `.network`, `.invalidApiKey`, …) also
+    /// returns `nil`, is logged as a warning and is kept in `lastError`. Errors do not consume the
+    /// first launch, so a later call retries. Use `checkDeferredDeepLinkThrowing` to get the error.
+    public static func checkDeferredDeepLink(_ options: DLNDeferredOptions = DLNDeferredOptions()) async -> DLNDeferredDeepLink? {
+        do {
+            return try await checkDeferredDeepLinkThrowing(options)
+        } catch let error as DeepLinkNowError where error.code == .notInitialized {
+            logger.warn("checkDeferredDeepLink: SDK not initialized. Call initialize() first")
+            return nil
+        } catch {
+            logger.warn("checkDeferredDeepLink failed: \(error)")
+            return nil
+        }
+    }
+
+    /// `checkDeferredDeepLink`, but throws `DeepLinkNowError` on failure (`.notInitialized`,
+    /// `.network`, …). The error is also recorded in `lastError` (SDK-85).
+    public static func checkDeferredDeepLinkThrowing(_ options: DLNDeferredOptions = DLNDeferredOptions()) async throws -> DLNDeferredDeepLink? {
+        do {
+            let link = try await runSharedDeferredCheck(options)
+            recordSuccess(kind: .deferredDeepLink)
+            return link
+        } catch {
+            throw recordFailure(error, kind: .deferredDeepLink)
+        }
+    }
+
+    private static func runSharedDeferredCheck(_ options: DLNDeferredOptions) async throws -> DLNDeferredDeepLink? {
         let (id, task): (UUID, Task<DLNDeferredDeepLink?, Error>) = state.withLock { s in
             if let current = s.deferred { return (current.id, current.task) }
             let id = UUID()
@@ -380,8 +448,8 @@ public final class DeepLinkNow {
     // MARK: - Fingerprint matching (SDK-20/21/22)
 
     /// All fingerprint candidates from `/api/v1/sdk/match`, unfiltered and in server order.
-    /// Returns `nil` when not initialized or on any error; prefer `findDeferredUserThrowing()`
-    /// or `checkDeferredDeepLink()`.
+    /// Returns `nil` when not initialized or on any error (logged, and kept in `lastError`, SDK-85);
+    /// use `findDeferredUserThrowing()` for the error, or `checkDeferredDeepLink()`.
     public static func findDeferredUser() async -> MatchResponse? {
         do {
             return try await findDeferredUserThrowing()
@@ -395,17 +463,36 @@ public final class DeepLinkNow {
     }
 
     /// All fingerprint candidates from `/api/v1/sdk/match`, unfiltered and in server order.
-    /// Zero matches is an empty response, not an error. Throws `DeepLinkNowError`.
+    /// Zero matches is an empty response, not an error. Throws `DeepLinkNowError`, also
+    /// recorded in `lastError` (SDK-85).
     public static func findDeferredUserThrowing() async throws -> MatchResponse {
-        let client = try await requireClient()
-        return try await fetchMatches(client)
+        do {
+            let client = try await requireClient()
+            let response = try await fetchMatches(client)
+            recordSuccess(kind: .findDeferredUser)
+            return response
+        } catch {
+            throw recordFailure(error, kind: .findDeferredUser)
+        }
+    }
+
+    /// Every SDK request goes through here. SDK-83: a 401 invalid key or 403 inactive account
+    /// from any endpoint (`init`, `match`) deletes the init cache, so a revoked key or a closed
+    /// account stops initializing from the device cache on the next launch.
+    private static func post(_ api: APIClient, _ endpoint: String, body: [String: Any]) async throws -> Data {
+        do {
+            return try await api.post(endpoint, body: body)
+        } catch let error as DeepLinkNowError where error.code == .invalidApiKey || error.code == .accountInactive {
+            InitCache.clear(in: environment.current.defaults)
+            throw error
+        }
     }
 
     private static func fetchMatches(_ client: Client) async throws -> MatchResponse {
         let snapshot = await MainActor.run { DeviceSnapshot.current() }
         let body = DeviceFingerprint.body(snapshot: snapshot)
         client.logger.debug("Sending match request")
-        let data = try await client.api.post("match", body: body)
+        let data = try await post(client.api, "match", body: body)
         do {
             let response = try JSONDecoder().decode(MatchResponse.self, from: data)
             client.logger.debug("Match response: \(response.matches.count) candidate(s)")

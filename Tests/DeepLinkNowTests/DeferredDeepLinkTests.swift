@@ -15,12 +15,12 @@ final class DeferredDeepLinkTests: DLNTestCase {
     private var matchRequests: Int { StubURLProtocol.requests(to: "match").count }
 
     private func requireLink(_ options: DLNDeferredOptions = DLNDeferredOptions(), file: StaticString = #filePath, line: UInt = #line) async throws -> DLNDeferredDeepLink {
-        let result = try await DeepLinkNow.checkDeferredDeepLink(options)
+        let result = try await DeepLinkNow.checkDeferredDeepLinkThrowing(options)
         return try XCTUnwrap(result, "expected a deferred deep link", file: file, line: line)
     }
 
     private func assertNoLink(_ options: DLNDeferredOptions = DLNDeferredOptions(), file: StaticString = #filePath, line: UInt = #line) async throws {
-        let result = try await DeepLinkNow.checkDeferredDeepLink(options)
+        let result = try await DeepLinkNow.checkDeferredDeepLinkThrowing(options)
         XCTAssertNil(result, file: file, line: line)
     }
 
@@ -29,7 +29,7 @@ final class DeferredDeepLinkTests: DLNTestCase {
     func test_SDK_10_resolvesToNilWhenNothingFound() async throws {
         // SDK-10: exactly one of link / nil / error.
         StubURLProtocol.stub("match", json: Fixtures.matchEmpty)
-        let result = try await DeepLinkNow.checkDeferredDeepLink()
+        let result = try await DeepLinkNow.checkDeferredDeepLinkThrowing()
         XCTAssertNil(result)
     }
 
@@ -55,7 +55,7 @@ final class DeferredDeepLinkTests: DLNTestCase {
         // SDK-12 / SDK-42
         fakePasteboard.content = "https://myapp.deeplinknow.com/products/123"
         StubURLProtocol.stub("match", json: Fixtures.matchResponse([Fixtures.match()]))
-        let link = try await DeepLinkNow.checkDeferredDeepLink(DLNDeferredOptions(useClipboard: false))
+        let link = await DeepLinkNow.checkDeferredDeepLink(DLNDeferredOptions(useClipboard: false))
         XCTAssertEqual(link?.source, .fingerprint)
         XCTAssertEqual(fakePasteboard.reads, 0)
         XCTAssertEqual(fakePasteboard.detectCalls, 0)
@@ -66,7 +66,7 @@ final class DeferredDeepLinkTests: DLNTestCase {
         fakePasteboard.content = "just some text"
         fakePasteboard.detectResultOverride = .some(false)
         StubURLProtocol.stub("match", json: Fixtures.matchEmpty)
-        _ = try await DeepLinkNow.checkDeferredDeepLink()
+        _ = await DeepLinkNow.checkDeferredDeepLink()
         XCTAssertEqual(fakePasteboard.reads, 0)
         XCTAssertEqual(matchRequests, 1)
     }
@@ -76,7 +76,7 @@ final class DeferredDeepLinkTests: DLNTestCase {
         fakePasteboard.content = nil
         fakePasteboard.detectResultOverride = .some(true)
         StubURLProtocol.stub("match", json: Fixtures.matchResponse([Fixtures.match()]))
-        let link = try await DeepLinkNow.checkDeferredDeepLink()
+        let link = await DeepLinkNow.checkDeferredDeepLink()
         XCTAssertEqual(link?.source, .fingerprint)
         XCTAssertEqual(fakePasteboard.reads, 1)
     }
@@ -211,7 +211,7 @@ final class DeferredDeepLinkTests: DLNTestCase {
             Fixtures.match(id: "second", confidence: 40, quality: "LOW"),
             Fixtures.match(id: "third", confidence: 90),
         ]))
-        let link = try await DeepLinkNow.checkDeferredDeepLink(DLNDeferredOptions(useClipboard: false))
+        let link = await DeepLinkNow.checkDeferredDeepLink(DLNDeferredOptions(useClipboard: false))
         XCTAssertEqual(link?.deeplinkId, "second")
         XCTAssertEqual(link?.matchQuality, .low)
     }
@@ -223,20 +223,20 @@ final class DeferredDeepLinkTests: DLNTestCase {
             Fixtures.match(id: "low", confidence: 31, quality: "LOW"),
             Fixtures.match(id: "mid", confidence: 60, quality: "MEDIUM"),
         ]))
-        let unfiltered = try await DeepLinkNow.checkDeferredDeepLink(DLNDeferredOptions(useClipboard: false))
+        let unfiltered = await DeepLinkNow.checkDeferredDeepLink(DLNDeferredOptions(useClipboard: false))
         XCTAssertEqual(unfiltered?.deeplinkId, "low")
 
-        let filtered = try await DeepLinkNow.checkDeferredDeepLink(DLNDeferredOptions(minConfidence: 50, useClipboard: false, force: true))
+        let filtered = await DeepLinkNow.checkDeferredDeepLink(DLNDeferredOptions(minConfidence: 50, useClipboard: false, force: true))
         XCTAssertEqual(filtered?.deeplinkId, "mid")
 
-        let none = try await DeepLinkNow.checkDeferredDeepLink(DLNDeferredOptions(minConfidence: 99, useClipboard: false, force: true))
+        let none = await DeepLinkNow.checkDeferredDeepLink(DLNDeferredOptions(minConfidence: 99, useClipboard: false, force: true))
         XCTAssertNil(none)
     }
 
     func test_SDK_14_minConfidenceDoesNotApplyToClipboard() async throws {
         // SDK-14
         fakePasteboard.content = "https://myapp.deeplinknow.com/x"
-        let link = try await DeepLinkNow.checkDeferredDeepLink(DLNDeferredOptions(minConfidence: 101))
+        let link = await DeepLinkNow.checkDeferredDeepLink(DLNDeferredOptions(minConfidence: 101))
         XCTAssertEqual(link?.source, .clipboard)
     }
 
@@ -251,7 +251,7 @@ final class DeferredDeepLinkTests: DLNTestCase {
 
         clearCapturedRequests()
         let readsBefore = fakePasteboard.reads
-        let again = try await DeepLinkNow.checkDeferredDeepLink()
+        let again = await DeepLinkNow.checkDeferredDeepLink()
         XCTAssertNil(again)
         XCTAssertEqual(matchRequests, 0, "no network after completion")
         XCTAssertEqual(fakePasteboard.reads, readsBefore, "no clipboard access after completion")
@@ -267,8 +267,8 @@ final class DeferredDeepLinkTests: DLNTestCase {
     func test_SDK_23_forceIgnoresTheFlag() async throws {
         // SDK-23: force
         StubURLProtocol.stub("match", json: Fixtures.matchResponse([Fixtures.match()]))
-        _ = try await DeepLinkNow.checkDeferredDeepLink(DLNDeferredOptions(useClipboard: false))
-        let forced = try await DeepLinkNow.checkDeferredDeepLink(DLNDeferredOptions(useClipboard: false, force: true))
+        _ = await DeepLinkNow.checkDeferredDeepLink(DLNDeferredOptions(useClipboard: false))
+        let forced = await DeepLinkNow.checkDeferredDeepLink(DLNDeferredOptions(useClipboard: false, force: true))
         XCTAssertNotNil(forced)
         XCTAssertEqual(matchRequests, 2)
     }
@@ -278,13 +278,13 @@ final class DeferredDeepLinkTests: DLNTestCase {
         for (status, body) in [(500, Fixtures.errorInternal), (429, Fixtures.errorRateLimited), (200, "<html>portal</html>")] {
             StubURLProtocol.reset()
             StubURLProtocol.stub("match", status: status, json: body)
-            let error = await captureError { try await DeepLinkNow.checkDeferredDeepLink(DLNDeferredOptions(useClipboard: false)) }
+            let error = await captureError { try await DeepLinkNow.checkDeferredDeepLinkThrowing(DLNDeferredOptions(useClipboard: false)) }
             XCTAssertNotNil(error)
             XCTAssertFalse(defaults.bool(forKey: DeepLinkNow.deferredCompletedKey), "HTTP \(status) must not set the flag")
         }
         StubURLProtocol.reset()
         StubURLProtocol.stub("match", error: URLError(.notConnectedToInternet))
-        let offline = await captureError { try await DeepLinkNow.checkDeferredDeepLink(DLNDeferredOptions(useClipboard: false)) }
+        let offline = await captureError { try await DeepLinkNow.checkDeferredDeepLinkThrowing(DLNDeferredOptions(useClipboard: false)) }
         XCTAssertEqual(offline?.code, .network)
         XCTAssertFalse(defaults.bool(forKey: DeepLinkNow.deferredCompletedKey))
 
@@ -297,7 +297,7 @@ final class DeferredDeepLinkTests: DLNTestCase {
     func test_SDK_24_notInitializedDoesNotSetTheFlag() async throws {
         // SDK-24
         DeepLinkNow.resetForTesting()
-        let error = await captureError { try await DeepLinkNow.checkDeferredDeepLink() }
+        let error = await captureError { try await DeepLinkNow.checkDeferredDeepLinkThrowing() }
         XCTAssertEqual(error?.code, .notInitialized)
         XCTAssertFalse(defaults.bool(forKey: DeepLinkNow.deferredCompletedKey))
     }
@@ -305,7 +305,7 @@ final class DeferredDeepLinkTests: DLNTestCase {
     func test_SDK_25_flagLivesInLocalUserDefaultsOnly() async throws {
         // SDK-25 / IOS-18: an SDK-namespaced UserDefaults key (deleted on uninstall, not in iCloud KVS).
         StubURLProtocol.stub("match", json: Fixtures.matchEmpty)
-        _ = try await DeepLinkNow.checkDeferredDeepLink(DLNDeferredOptions(useClipboard: false))
+        _ = await DeepLinkNow.checkDeferredDeepLink(DLNDeferredOptions(useClipboard: false))
         XCTAssertEqual(DeepLinkNow.deferredCompletedKey, "com.deeplinknow.deferredCheckCompleted")
         XCTAssertTrue(defaults.bool(forKey: DeepLinkNow.deferredCompletedKey))
     }
@@ -314,7 +314,7 @@ final class DeferredDeepLinkTests: DLNTestCase {
         // SDK-26
         StubURLProtocol.stub("match", json: Fixtures.matchResponse([Fixtures.match()]))
         fakePasteboard.content = "https://example.com"
-        _ = try await DeepLinkNow.checkDeferredDeepLink()
+        _ = await DeepLinkNow.checkDeferredDeepLink()
         DeepLinkNow.resetDeferredDeepLink()
         XCTAssertFalse(defaults.bool(forKey: DeepLinkNow.deferredCompletedKey))
         XCTAssertFalse(defaults.bool(forKey: DeepLinkNow.clipboardCheckedKey))
@@ -326,9 +326,9 @@ final class DeferredDeepLinkTests: DLNTestCase {
         // SDK-27
         StubURLProtocol.stub("match", json: Fixtures.matchResponse([Fixtures.match(id: "shared")]))
         let options = DLNDeferredOptions(useClipboard: false)
-        async let a = DeepLinkNow.checkDeferredDeepLink(options)
-        async let b = DeepLinkNow.checkDeferredDeepLink(options)
-        async let c = DeepLinkNow.checkDeferredDeepLink(options)
+        async let a = DeepLinkNow.checkDeferredDeepLinkThrowing(options)
+        async let b = DeepLinkNow.checkDeferredDeepLinkThrowing(options)
+        async let c = DeepLinkNow.checkDeferredDeepLinkThrowing(options)
         let results = try await [a, b, c]
         XCTAssertEqual(matchRequests, 1)
         XCTAssertEqual(results.map { $0?.deeplinkId }, ["shared", "shared", "shared"])
@@ -340,10 +340,10 @@ final class DeferredDeepLinkTests: DLNTestCase {
         // IOS-27 / SDK-42: even if /match fails after the read, the next run does not read again.
         fakePasteboard.content = "https://example.com/unrelated"
         StubURLProtocol.stub("match", status: 500, json: Fixtures.errorInternal)
-        _ = await captureError { try await DeepLinkNow.checkDeferredDeepLink() }
+        _ = await captureError { try await DeepLinkNow.checkDeferredDeepLinkThrowing() }
         StubURLProtocol.reset()
         StubURLProtocol.stub("match", json: Fixtures.matchEmpty)
-        _ = try await DeepLinkNow.checkDeferredDeepLink()
+        _ = await DeepLinkNow.checkDeferredDeepLink()
         XCTAssertEqual(fakePasteboard.reads, 1)
     }
 
@@ -359,7 +359,7 @@ final class DeferredDeepLinkTests: DLNTestCase {
         // SDK-43
         let copied = "https://myapp.deeplinknow.com/x"
         fakePasteboard.content = copied
-        _ = try await DeepLinkNow.checkDeferredDeepLink()
+        _ = await DeepLinkNow.checkDeferredDeepLink()
         XCTAssertEqual(fakePasteboard.content, copied)
     }
 
@@ -368,7 +368,7 @@ final class DeferredDeepLinkTests: DLNTestCase {
         await initializeSDK(config: DLNConfig(apiKey: Self.apiKey, enableLogs: true))
         fakePasteboard.content = "https://secret.example.com/private-token-123"
         StubURLProtocol.stub("match", json: Fixtures.matchEmpty)
-        _ = try await DeepLinkNow.checkDeferredDeepLink()
+        _ = await DeepLinkNow.checkDeferredDeepLink()
         XCTAssertFalse(logs.joined.contains("private-token-123"))
     }
 
@@ -396,7 +396,7 @@ final class DeferredDeepLinkTests: DLNTestCase {
         let initTask = Task { try await DeepLinkNow.initializeThrowing(config: DLNConfig(apiKey: Self.apiKey), urlSession: session) }
         // Give the init task a chance to register itself, then ask for the link.
         while !DeepLinkNow.state.withLock({ $0.inFlight != nil || $0.client != nil }) { await Task.yield() }
-        let link = try await DeepLinkNow.checkDeferredDeepLink(DLNDeferredOptions(useClipboard: false))
+        let link = await DeepLinkNow.checkDeferredDeepLink(DLNDeferredOptions(useClipboard: false))
         _ = try await initTask.value
         XCTAssertEqual(link?.deeplinkId, "after-init")
     }

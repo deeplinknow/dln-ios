@@ -5,7 +5,7 @@ import Foundation
 ///
 /// The whole integration is three calls:
 ///   1. `DeepLinkNow.initializeThrowing(config:)`   once, at startup (throws `DeepLinkNowError`)
-///   2. `DeepLinkNow.checkDeferredDeepLink()`        once, on first launch after install
+///   2. `DeepLinkNow.checkDeferredDeepLink()`        once, on first launch after install (never throws)
 ///   3. `DeepLinkNow.parseLink(_:)`                  for Universal Links that open the app
 @MainActor
 final class DeepLinkModel: ObservableObject {
@@ -43,16 +43,14 @@ final class DeepLinkModel: ObservableObject {
     /// (unless `force`). On iOS it reads the pasteboard first (the landing page copied the
     /// link there; iOS 16+ may ask the user to allow pasting), then falls back to fingerprinting.
     func checkDeferredDeepLink(force: Bool) async {
-        deferredError = nil
-        do {
-            let link = try await DeepLinkNow.checkDeferredDeepLink(
-                DLNDeferredOptions(minConfidence: minConfidence, force: force)
-            )
-            deferredLink = .some(link)
-            // In a real app: if let link { router.open(path: link.path, query: link.queryParams) }
-        } catch {
-            deferredError = String(describing: error)
-        }
+        // Never throws (SDK-85): nil means "no link" or "the check failed". Your app just carries
+        // on to its normal start screen; DeepLinkNow.lastError says why when it failed.
+        let link = await DeepLinkNow.checkDeferredDeepLink(
+            DLNDeferredOptions(minConfidence: minConfidence, force: force)
+        )
+        deferredLink = .some(link)
+        deferredError = link == nil ? DeepLinkNow.lastError.map { String(describing: $0) } : nil
+        // In a real app: if let link { router.open(path: link.path, query: link.queryParams) }
     }
 
     /// For testing: forget that this install was checked, so the next check runs again.

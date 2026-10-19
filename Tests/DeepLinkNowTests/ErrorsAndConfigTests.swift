@@ -95,12 +95,42 @@ final class ErrorsAndConfigTests: DLNTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(start), 5)
     }
 
+    func test_SDK_53_IOS_06_retryAttemptsClampedToFive() async throws {
+        // A huge retryAttempts must not mean minutes of retries: at most 5 retries (6 requests).
+        StubURLProtocol.stub("init", status: 503, json: Fixtures.errorInternal)
+        let error = await captureError { try await self.initThrowing(DLNConfig(apiKey: Self.apiKey, retryAttempts: 1_000_000)) }
+        XCTAssertEqual(error?.code, .server)
+        XCTAssertEqual(StubURLProtocol.requests(to: "init").count, 1 + APIClient.maxRetryAttempts)
+        XCTAssertEqual(APIClient.maxRetryAttempts, 5)
+    }
+
+    func test_SDK_53_backoffDelaysCappedAtFiveSeconds() {
+        let delays = (0..<8).map { APIClient.backoff(attempt: $0, retryAfter: nil, delayScale: 1) }
+        XCTAssertEqual(delays, [0.5, 1, 2, 4, 5, 5, 5, 5])
+        XCTAssertEqual(APIClient.backoff(attempt: Int.max, retryAfter: nil, delayScale: 1), 5)
+        XCTAssertEqual(APIClient.backoff(attempt: 0, retryAfter: 120, delayScale: 1), 5)
+        XCTAssertEqual(APIClient.backoff(attempt: 0, retryAfter: 2, delayScale: 1), 2)
+        XCTAssertEqual(APIClient.backoff(attempt: 0, retryAfter: -3, delayScale: 1), 0)
+        // A non-finite Retry-After ("nan", "inf") falls back to the exponential delay.
+        XCTAssertEqual(APIClient.backoff(attempt: 1, retryAfter: .nan, delayScale: 1), 1)
+        XCTAssertEqual(APIClient.backoff(attempt: 1, retryAfter: .infinity, delayScale: 1), 1)
+        XCTAssertEqual(APIClient.backoff(attempt: 3, retryAfter: nil, delayScale: 0), 0)
+    }
+
+    func test_SDK_50_SDK_53_sleepConversionNeverTraps() {
+        XCTAssertEqual(APIClient.sleepNanoseconds(0.5), 500_000_000)
+        XCTAssertEqual(APIClient.sleepNanoseconds(1e300), 5_000_000_000)
+        XCTAssertEqual(APIClient.sleepNanoseconds(.infinity), 0)
+        XCTAssertEqual(APIClient.sleepNanoseconds(.nan), 0)
+        XCTAssertEqual(APIClient.sleepNanoseconds(-1), 0)
+    }
+
     func test_SDK_52_deferredCheckBoundedByRetries() async throws {
         // SDK-52: a failing /match gives up after 1 + retryAttempts requests.
         StubURLProtocol.stub("init", json: Fixtures.initWithVerifiedCustomDomain)
         StubURLProtocol.stub("match", status: 503, json: Fixtures.errorInternal)
         _ = try await initThrowing(DLNConfig(apiKey: Self.apiKey, retryAttempts: 2))
-        let error = await captureError { try await DeepLinkNow.checkDeferredDeepLink(DLNDeferredOptions(useClipboard: false)) }
+        let error = await captureError { try await DeepLinkNow.checkDeferredDeepLinkThrowing(DLNDeferredOptions(useClipboard: false)) }
         XCTAssertEqual(error?.code, .server)
         XCTAssertEqual(StubURLProtocol.requests(to: "match").count, 3)
     }
@@ -159,7 +189,7 @@ final class ErrorsAndConfigTests: DLNTestCase {
         XCTAssertFalse(DeepLinkNow.isInitialized)
         XCTAssertEqual(DeepLinkNow.initializationError?.code, .invalidApiKey)
 
-        let deferred = await captureError { try await DeepLinkNow.checkDeferredDeepLink() }
+        let deferred = await captureError { try await DeepLinkNow.checkDeferredDeepLinkThrowing() }
         XCTAssertEqual(deferred?.code, .notInitialized)
         XCTAssertEqual(deferred?.cause?.code, .invalidApiKey)
 
@@ -170,7 +200,7 @@ final class ErrorsAndConfigTests: DLNTestCase {
 
     func test_SDK_04_neverInitializedThrowsNotInitializedWithoutCause() async {
         // SDK-04
-        let error = await captureError { try await DeepLinkNow.checkDeferredDeepLink() }
+        let error = await captureError { try await DeepLinkNow.checkDeferredDeepLinkThrowing() }
         XCTAssertEqual(error?.code, .notInitialized)
         XCTAssertNil(error?.cause)
     }
@@ -220,6 +250,19 @@ final class ErrorsAndConfigTests: DLNTestCase {
         XCTAssertEqual(match.deeplink?.metadata.count, 0)
         XCTAssertEqual(match.deeplink?.queryParams?["n"], .string("5"))
         XCTAssertNil(match.deeplink?.queryParams?["bad"])
+    }
+
+    func test_SDK_50_SDK_51_outOfRangeTimeDifferenceIsInvalidResponseNotACrash() async throws {
+        StubURLProtocol.stub("init", json: Fixtures.initWithVerifiedCustomDomain)
+        _ = try await initThrowing(DLNConfig(apiKey: Self.apiKey, retryAttempts: 0))
+        for value in ["1e300", "-1e300", "9223372036854775808.5"] {
+            StubURLProtocol.reset()
+            let json = Fixtures.match().replacingOccurrences(of: #""time_difference_minutes": 2"#,
+                                                              with: #""time_difference_minutes": \#(value)"#)
+            StubURLProtocol.stub("match", json: Fixtures.matchResponse([json]))
+            let error = await captureError { try await DeepLinkNow.findDeferredUserThrowing() }
+            XCTAssertEqual(error?.code, .invalidResponse, value)
+        }
     }
 
     // MARK: SDK-07 / SDK-08 / SDK-09
@@ -320,7 +363,7 @@ final class ErrorsAndConfigTests: DLNTestCase {
         StubURLProtocol.stub("init", json: Fixtures.initWithVerifiedCustomDomain)
         StubURLProtocol.stub("match", json: Fixtures.matchEmpty)
         _ = try await DeepLinkNow.initializeThrowing(config: DLNConfig(apiKey: Self.apiKey), urlSession: makeSession())
-        _ = try await DeepLinkNow.checkDeferredDeepLink(DLNDeferredOptions(useClipboard: false))
+        _ = await DeepLinkNow.checkDeferredDeepLink(DLNDeferredOptions(useClipboard: false))
         XCTAssertTrue(Thread.isMainThread)
     }
 }

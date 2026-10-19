@@ -50,10 +50,22 @@ enum DeviceFingerprint {
         return String(hash, radix: 16)
     }
 
-    static func language() -> String {
-        Locale.current.identifier
-            .split(separator: "@").first.map(String.init)?
-            .replacingOccurrences(of: "_", with: "-") ?? "en-US"
+    /// SDK-22: the user's preferred language as a BCP-47 tag (`fr-FR`), comparable with the
+    /// browser's `navigator.language` on the link page. `Locale.current` follows the app's
+    /// bundled localizations (an English-only app on a French device reports `en-FR`), so it
+    /// is only the fallback, then `en-US`.
+    static func language(preferred: [String] = Locale.preferredLanguages,
+                         current: Locale = .current) -> String {
+        bcp47(preferred.first) ?? bcp47(current.identifier) ?? "en-US"
+    }
+
+    /// `fr_FR@calendar=gregorian` → `fr-FR`. Empty input yields nil.
+    static func bcp47(_ identifier: String?) -> String? {
+        guard let identifier = identifier else { return nil }
+        let tag = (identifier.split(separator: "@").first.map(String.init) ?? "")
+            .replacingOccurrences(of: "_", with: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return tag.isEmpty ? nil : tag
     }
 
     static func body(snapshot s: DeviceSnapshot, now: Date = Date()) -> [String: Any] {

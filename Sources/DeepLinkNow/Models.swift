@@ -305,7 +305,12 @@ public struct TimeProximityDetails: Codable, Sendable {
             timeDifferenceMinutes = whole
         } else {
             let minutes = try c.decode(Double.self, forKey: .timeDifferenceMinutes)
-            timeDifferenceMinutes = minutes.isFinite ? Int(minutes.rounded(.up)) : 0
+            // SDK-50/51: a value outside Int's range is malformed (invalidResponse), never a trap.
+            guard let whole = Int(exactly: minutes.rounded(.up)) else {
+                throw DecodingError.dataCorruptedError(forKey: .timeDifferenceMinutes, in: c,
+                                                       debugDescription: "time_difference_minutes out of range")
+            }
+            timeDifferenceMinutes = whole
         }
     }
 }

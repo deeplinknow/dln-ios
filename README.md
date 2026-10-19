@@ -19,13 +19,13 @@ On iOS the SDK reads the link the DLN landing page copied to the pasteboard (exa
 ### CocoaPods
 
 ```ruby
-pod 'DeepLinkNow', '~> 1.1'
+pod 'DeepLinkNow', '~> 1.2'
 ```
 
 ### Swift Package Manager
 
 ```swift
-.package(url: "https://github.com/deeplinknow/dln-ios.git", from: "1.1.0")
+.package(url: "https://github.com/deeplinknow/dln-ios.git", from: "1.2.0")
 ```
 
 No `Info.plist` keys are needed.
@@ -59,27 +59,26 @@ do {
 | `enableLogs` | `false` | Debug logs prefixed `[DeepLinkNow]`. The API key is never logged. |
 | `baseUrl` | `https://deeplinknow.com` | A trailing `/` is fine. Must be https (http only for localhost). |
 | `timeout` | `10` s | Per request. |
-| `retryAttempts` | `2` | Retries transport errors, timeouts, 5xx and 429 with backoff. 4xx is never retried. |
+| `retryAttempts` | `2` | Retries transport errors, timeouts, 5xx and 429 with backoff (at most 5 retries, each delay at most 5 s). 4xx is never retried. |
 
-The original `await DeepLinkNow.initialize(config:)` still works. It logs failures instead of throwing; check `DeepLinkNow.isInitialized` and `DeepLinkNow.initializationError`.
+`await DeepLinkNow.initialize(config:)` never throws. It logs failures instead; check `DeepLinkNow.isInitialized` and `DeepLinkNow.initializationError` (or `DeepLinkNow.lastError`).
 
 ### 2. Get the deferred deep link (first launch)
 
 ```swift
-do {
-    if let link = try await DeepLinkNow.checkDeferredDeepLink() {
-        // link.path        "/products/123"           (not decoded)
-        // link.queryParams ["ref": .string("newsletter")]
-        // link.fullPath    "/products/123?ref=newsletter"
-        // link.url         "https://myapp.deeplinknow.com/products/123?ref=newsletter"
-        // link.source      .clipboard or .fingerprint
-        // link.confidenceScore / link.matchQuality (100 / .high for the clipboard)
-        router.open(path: link.path, query: link.queryParams)
-    }
-} catch let error as DeepLinkNowError {
-    // Not initialized, offline, server error… The first launch is not consumed; try again later.
+if let link = await DeepLinkNow.checkDeferredDeepLink() {
+    // link.path        "/products/123"           (not decoded)
+    // link.queryParams ["ref": .string("newsletter")]
+    // link.fullPath    "/products/123?ref=newsletter"
+    // link.url         "https://myapp.deeplinknow.com/products/123?ref=newsletter"
+    // link.source      .clipboard or .fingerprint
+    // link.confidenceScore / link.matchQuality (100 / .high for the clipboard)
+    router.open(path: link.path, query: link.queryParams)
 }
+// No link? Carry on to your normal start screen.
 ```
+
+`checkDeferredDeepLink` never throws. `nil` means there was no link, or the check failed (not initialized, offline, invalid key…). A failure is logged as a warning and kept in `DeepLinkNow.lastError` (a `DeepLinkNowError`) until the next successful check, and it does not consume the first launch, so a later call tries again. If you want the error thrown, use `try await DeepLinkNow.checkDeferredDeepLinkThrowing()`.
 
 What it does:
 
@@ -89,7 +88,7 @@ What it does:
 Options (`DLNDeferredOptions`):
 
 ```swift
-try await DeepLinkNow.checkDeferredDeepLink(DLNDeferredOptions(
+await DeepLinkNow.checkDeferredDeepLink(DLNDeferredOptions(
     minConfidence: 50,   // default nil = accept every candidate; you choose the threshold
     useClipboard: false, // skip the pasteboard (no paste prompt; fingerprint only)
     force: false         // ignore the first-launch flag

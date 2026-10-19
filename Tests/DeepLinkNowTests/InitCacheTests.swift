@@ -97,6 +97,34 @@ final class InitCacheTests: DLNTestCase {
         XCTAssertNil(InitCache.load(from: defaults))
     }
 
+    func test_SDK_83_a401Or403InactiveFromMatchClearsTheCache() async throws {
+        // A key revoked after init: /match says 401, so the next launch must not init from cache.
+        for (status, body) in [(401, Fixtures.errorInvalidKey), (403, Fixtures.errorAccountInactive)] {
+            relaunch()
+            UserDefaults().removePersistentDomain(forName: Self.defaultsSuite)
+            await initializeSDK(config: DLNConfig(apiKey: Self.apiKey, retryAttempts: 0))
+            XCTAssertNotNil(InitCache.load(from: defaults))
+            StubURLProtocol.stub("match", status: status, json: body)
+            _ = await captureError { try await DeepLinkNow.findDeferredUserThrowing() }
+            XCTAssertNil(InitCache.load(from: defaults), "HTTP \(status) from /match")
+
+            relaunch()
+            await initializeSDK(initJSON: Fixtures.errorInvalidKey, status: 401)
+            XCTAssertEqual(StubURLProtocol.requests(to: "init").count, 1, "next launch asks the server")
+            XCTAssertFalse(DeepLinkNow.isInitialized)
+        }
+    }
+
+    func test_SDK_83_otherMatchErrorsKeepTheCache() async throws {
+        await initializeSDK(config: DLNConfig(apiKey: Self.apiKey, retryAttempts: 0))
+        for (status, body) in [(403, Fixtures.errorNoCredits), (429, Fixtures.errorRateLimited), (500, Fixtures.errorInternal)] {
+            StubURLProtocol.reset()
+            StubURLProtocol.stub("match", status: status, json: body)
+            _ = await captureError { try await DeepLinkNow.findDeferredUserThrowing() }
+            XCTAssertNotNil(InitCache.load(from: defaults), "HTTP \(status) from /match")
+        }
+    }
+
     func test_SDK_83_SDK_26_resetDeferredDeepLinkClearsTheCache() async throws {
         await initializeSDK()
         DeepLinkNow.resetDeferredDeepLink()

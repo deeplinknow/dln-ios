@@ -71,7 +71,7 @@ final class ClipboardTests: DLNTestCase {
     func test_IOS_27_checkDeferredDeepLinkUsesRealPasteboardOnce() async throws {
         // IOS-27 / SDK-12 on the real UIPasteboard (Catalyst).
         await MainActor.run { setClipboard("https://myapp.deeplinknow.com/products/9?ref=nl") }
-        let link = try await DeepLinkNow.checkDeferredDeepLink()
+        let link = await DeepLinkNow.checkDeferredDeepLink()
         XCTAssertEqual(link?.source, .clipboard)
         XCTAssertEqual(link?.path, "/products/9")
         XCTAssertEqual(link?.queryParams["ref"], .string("nl"))

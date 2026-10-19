@@ -41,7 +41,7 @@ DLN is not an analytics or attribution SDK. It never reads the IDFA, never trigg
 ### CocoaPods
 
 ```ruby
-pod 'DeepLinkNow', '~> 1.1'
+pod 'DeepLinkNow', '~> 1.2'
 ```
 
 ### Swift Package Manager
@@ -49,7 +49,7 @@ pod 'DeepLinkNow', '~> 1.1'
 In Xcode choose **File > Add Package Dependencies...** and enter `https://github.com/deeplinknow/dln-ios`, or add it to `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/deeplinknow/dln-ios.git", from: "1.1.0")
+.package(url: "https://github.com/deeplinknow/dln-ios.git", from: "1.2.0")
 ```
 
 The SDK links only UIKit and Foundation. No `Info.plist` keys are required (iOS has no usage-description key for the pasteboard).
@@ -72,7 +72,7 @@ let config = DLNConfig(
     enableLogs: false,      // debug logs, prefixed [DeepLinkNow]; the key is never logged
     baseUrl: nil,           // default https://deeplinknow.com; a trailing "/" is fine
     timeout: nil,           // default 10 s per request
-    retryAttempts: nil      // default 2 retries for transient failures
+    retryAttempts: nil      // default 2 retries for transient failures (clamped to 0...5)
 )
 
 do {
@@ -84,20 +84,29 @@ do {
 ```
 
 - One call makes one `POST /api/v1/sdk/init` (plus retries). The key is sent in the `x-api-key` header, never in the URL.
-- Transport errors, timeouts, 5xx and 429 are retried up to `retryAttempts` times with exponential backoff (0.5 s, 1 s, …), honouring `Retry-After` up to 5 s. 400/401/403/404/410 are never retried.
+- Transport errors, timeouts, 5xx and 429 are retried up to `retryAttempts` times (at most 5) with exponential backoff (0.5 s, 1 s, 2 s, 4 s, then 5 s), honouring `Retry-After` up to 5 s. 400/401/403/404/410 are never retried.
 - A failed init leaves `DeepLinkNow.isInitialized == false` and sets `DeepLinkNow.initializationError`. Calling initialize again atomically replaces the previous configuration. Concurrent calls with the same key share one request.
 - Init never reads the pasteboard and never blocks the main thread.
 - `baseUrl` must be https; `http://localhost`, `127.0.0.1` and `10.0.2.2` are allowed for development. An invalid `baseUrl` throws `.invalidConfiguration` instead of crashing.
 
-The non-throwing `await DeepLinkNow.initialize(config:urlSession:)` from 1.0 still works; it logs a warning on failure. Calls made while initialization is in flight wait for it.
+The non-throwing `await DeepLinkNow.initialize(config:urlSession:)` never throws; it logs a warning on failure and sets `initializationError` and `lastError`. Calls made while initialization is in flight wait for it.
 
 ## The deferred deep link
 
 Call once at startup, after initializing:
 
 ```swift
+if let link = await DeepLinkNow.checkDeferredDeepLink() {
+    route(path: link.path, query: link.queryParams)
+}
+// No link? Carry on to your normal start screen.
+```
+
+`checkDeferredDeepLink` never throws. `nil` means "no link" or "the check failed"; a failure is logged as a warning and kept in `DeepLinkNow.lastError` (see [Errors](#errors)). To get the error thrown instead:
+
+```swift
 do {
-    if let link = try await DeepLinkNow.checkDeferredDeepLink() {
+    if let link = try await DeepLinkNow.checkDeferredDeepLinkThrowing() {
         route(path: link.path, query: link.queryParams)
     }
 } catch let error as DeepLinkNowError {
@@ -211,13 +220,14 @@ Keys are case-sensitive. `DLNQueryValue` offers `stringValue` (first value, `nil
 | API | Notes |
 |---|---|
 | `findDeferredUserThrowing() async throws -> MatchResponse` | The full `/match` response: every candidate with `confidenceScore`, `matchQuality`, `matchDetails` and `deeplink` (incl. `queryParams`, `fullPath`), plus `ttlSeconds`. Not filtered or reordered. Zero matches is an empty response. |
-| `findDeferredUser() async -> MatchResponse?` | Same, `nil` on any error or before init. |
+| `findDeferredUser() async -> MatchResponse?` | Same, `nil` on any error or before init (the error is kept in `lastError`). |
 | `checkClipboard() -> String?` | Reads the pasteboard (may show the paste prompt). Returns the trimmed text only if it is a single URL on your link domains. |
 | `hasDeepLinkToken() -> Bool` | `hasURLs || hasStrings`. Never reads the content, never prompts. `true` means "worth calling `checkClipboard()`", not "verified". |
 | `hasDeepLinkTokenAsync() async -> Bool` | Uses `detectPatterns(for: [.probableWebURL])` on iOS 14+. Never reads the content. |
 | `createDeepLink(path:customParameters:) -> URL?` | `https://<primary domain><path>?<params>` (primary = first verified custom domain, else `<alias>.deeplinknow.com`). Keys are sorted and strictly encoded, so `parseLink` returns the same path and parameters. `nil` before init. |
 | `isInitialized`, `initializationError`, `appInfo` | Init state. |
-| `sdkVersion` | `"1.1.0"`. |
+| `lastError: DeepLinkNowError?` | The last failure of `initialize`, `checkDeferredDeepLink` or `findDeferredUser` (either variant); cleared by the next successful call of the same kind. |
+| `sdkVersion` | `"1.2.0"`. |
 
 ```swift
 let url = DeepLinkNow.createDeepLink(
@@ -229,7 +239,14 @@ let url = DeepLinkNow.createDeepLink(
 
 ## Errors
 
-The throwing APIs throw `DeepLinkNowError` (`code`, `statusCode`, `message`, `underlying`, `cause`). Codes are shared with the Android and React Native SDKs:
+The everyday calls (`initialize`, `checkDeferredDeepLink`, `findDeferredUser`) never throw: a failure returns `nil`, logs a warning and is kept in `DeepLinkNow.lastError` until the next successful call of the same kind. The opt-in throwing variants (`initializeThrowing`, `checkDeferredDeepLinkThrowing`, `findDeferredUserThrowing`) throw the same error. Either way it is a `DeepLinkNowError` (`code`, `statusCode`, `message`, `underlying`, `cause`). Codes are shared with the Android and React Native SDKs:
+
+```swift
+if await DeepLinkNow.checkDeferredDeepLink() == nil, let error = DeepLinkNow.lastError {
+    print("Deferred check failed:", error.code)   // e.g. .network; the next launch tries again
+}
+```
+
 
 | Code | When |
 |---|---|
@@ -250,7 +267,7 @@ The legacy `DLNError` enum is unchanged for source compatibility; the new APIs d
 
 - All public APIs can be called from any thread or actor. Async APIs return on the caller's context.
 - SDK state is lock-protected. `UIScreen`, `UIDevice` and `UIPasteboard` are only touched on the main thread.
-- The SDK never crashes the host app: failures surface as `nil` (legacy APIs) or a thrown `DeepLinkNowError`.
+- The SDK never crashes the host app: failures surface as `nil` plus `lastError`, or as a thrown `DeepLinkNowError` from the `…Throwing` variants.
 
 ## Privacy
 
@@ -260,7 +277,7 @@ The legacy `DLNError` enum is unchanged for source compatibility; the new APIs d
 - Collected data: **Device ID** (`identifierForVendor`), purpose App Functionality, not linked to the user's identity, not used for tracking.
 - Required-reason API: `UserDefaults`, reason `CA92.1`.
 
-What the match request sends: a Safari-style user agent, platform `ios`, OS version, device class (`iPhone`/`iPad`), language (`en-US` form), IANA time zone, screen width/height in points and scale, CPU core count, install/open timestamps, the IDFV as `device_id`/`vendor_id` (or `null`), `advertising_id: null`, and an informational hash of those values. No IP address is sent (the server sees the connection), and nothing is stored on the device except the first-launch state. App Store privacy label: "Device ID — App Functionality — not linked — not used for tracking".
+What the match request sends: a Safari-style user agent, platform `ios`, OS version, device class (`iPhone`/`iPad`), the user's preferred language (`fr-FR` form, from `Locale.preferredLanguages`, so it matches what the browser reported on the link page), IANA time zone, screen width/height in points and scale, CPU core count, install/open timestamps, the IDFV as `device_id`/`vendor_id` (or `null`), `advertising_id: null`, and an informational hash of those values. No IP address is sent (the server sees the connection), and nothing is stored on the device except the first-launch state and the 24-hour `/init` cache. App Store privacy label: "Device ID — App Functionality — not linked — not used for tracking".
 
 ## Migrating from 1.0.x
 

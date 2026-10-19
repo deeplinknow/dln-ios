@@ -50,7 +50,10 @@ final class PrivacyAndPackagingTests: DLNTestCase {
         XCTAssertTrue(podspec.contains("s.ios.deployment_target = '13.0'"))
         let manifest = try read("Package.swift")
         XCTAssertTrue(manifest.contains(".iOS(.v13)"))
-        XCTAssertEqual(DeepLinkNow.sdkVersion, "1.1.0")
+        XCTAssertEqual(DeepLinkNow.sdkVersion, "1.2.0")
+        // deeplink.now is not a DLN domain (SDK-31); the pod author contact must be one we own.
+        XCTAssertTrue(podspec.contains("admin@deeplinknow.com"))
+        XCTAssertFalse(podspec.contains("deeplink.now"))
     }
 
     func test_IOS_02_noAdSupportATTOrCoreTelephony() throws {
@@ -144,6 +147,22 @@ final class PrivacyAndPackagingTests: DLNTestCase {
         XCTAssertEqual(fp["platform"] as? String, "ios")
     }
 
+    func test_SDK_22_languageIsTheUsersPreferredLanguageNotTheAppLocalization() {
+        // An English-only app on a French device: Locale.current is en_FR, the browser says fr-FR.
+        let appLocale = Locale(identifier: "en_FR")
+        XCTAssertEqual(DeviceFingerprint.language(preferred: ["fr-FR", "en-US"], current: appLocale), "fr-FR")
+        XCTAssertEqual(DeviceFingerprint.language(preferred: ["zh-Hans-CN"], current: appLocale), "zh-Hans-CN")
+        XCTAssertEqual(DeviceFingerprint.language(preferred: ["pt_BR@calendar=gregorian"], current: appLocale), "pt-BR")
+        // Fallbacks: the current locale, then en-US.
+        XCTAssertEqual(DeviceFingerprint.language(preferred: [], current: appLocale), "en-FR")
+        XCTAssertEqual(DeviceFingerprint.language(preferred: [" "], current: Locale(identifier: "de_DE")), "de-DE")
+        XCTAssertEqual(DeviceFingerprint.language(preferred: [], current: Locale(identifier: "")), "en-US")
+        // The default reads Locale.preferredLanguages.
+        if let first = Locale.preferredLanguages.first {
+            XCTAssertEqual(DeviceFingerprint.language(), first.replacingOccurrences(of: "_", with: "-"))
+        }
+    }
+
     func test_SDK_21_nullableKeysAlwaysPresent() async throws {
         // SDK-21
         let fp = try await sentFingerprint()
@@ -191,7 +210,7 @@ final class PrivacyAndPackagingTests: DLNTestCase {
         fakePasteboard.content = "https://example.com"
         await initializeSDK()
         StubURLProtocol.stub("match", json: Fixtures.matchResponse([Fixtures.match()]))
-        _ = try await DeepLinkNow.checkDeferredDeepLink()
+        _ = await DeepLinkNow.checkDeferredDeepLink()
         let keys = Set(defaults.persistentDomain(forName: Self.defaultsSuite)?.keys.map { $0 } ?? [])
         XCTAssertEqual(keys.subtracting([DeepLinkNow.deferredCompletedKey, DeepLinkNow.clipboardCheckedKey, InitCache.defaultsKey]), [])
         let cache = try XCTUnwrap(defaults.data(forKey: InitCache.defaultsKey))
@@ -217,7 +236,7 @@ final class PrivacyAndPackagingTests: DLNTestCase {
         // SDK-63 / IOS-08 / SDK-71
         await initializeSDK(config: DLNConfig(apiKey: Self.apiKey, enableLogs: true))
         StubURLProtocol.stub("match", json: Fixtures.matchResponse([Fixtures.match()]))
-        _ = try await DeepLinkNow.checkDeferredDeepLink(DLNDeferredOptions(useClipboard: false))
+        _ = await DeepLinkNow.checkDeferredDeepLink(DLNDeferredOptions(useClipboard: false))
         StubURLProtocol.stub("init", status: 401, json: Fixtures.errorInvalidKey)
         await DeepLinkNow.initialize(config: DLNConfig(apiKey: Self.apiKey, enableLogs: true), urlSession: makeSession())
         XCTAssertFalse(logs.lines.isEmpty, "logs were captured")
@@ -238,7 +257,7 @@ final class PrivacyAndPackagingTests: DLNTestCase {
         // SDK-70
         await initializeSDK(config: DLNConfig(apiKey: Self.apiKey, enableLogs: false))
         StubURLProtocol.stub("match", json: Fixtures.matchEmpty)
-        _ = try await DeepLinkNow.checkDeferredDeepLink(DLNDeferredOptions(useClipboard: false))
+        _ = await DeepLinkNow.checkDeferredDeepLink(DLNDeferredOptions(useClipboard: false))
         XCTAssertTrue(logs.lines.isEmpty, "no debug output with enableLogs off: \(logs.lines)")
 
         await initializeSDK(config: DLNConfig(apiKey: Self.apiKey, enableLogs: true))
@@ -251,7 +270,7 @@ final class PrivacyAndPackagingTests: DLNTestCase {
         await initializeSDK(config: DLNConfig(apiKey: Self.apiKey, enableLogs: true))
         fakePasteboard.content = "https://example.com/x"
         StubURLProtocol.stub("match", json: Fixtures.matchResponse([Fixtures.match(confidence: 61, quality: "MEDIUM")]))
-        _ = try await DeepLinkNow.checkDeferredDeepLink()
+        _ = await DeepLinkNow.checkDeferredDeepLink()
         XCTAssertTrue(logs.joined.contains("clipboard has no DLN link"))
         XCTAssertTrue(logs.joined.contains("fingerprint match 61"))
     }
@@ -263,7 +282,9 @@ final class PrivacyAndPackagingTests: DLNTestCase {
         let _: (DLNConfig, URLSessionProtocol) async throws -> DLNAppInfo = DeepLinkNow.initializeThrowing(config:urlSession:)
         let _: (DLNConfig, URLSessionProtocol) async -> Void = DeepLinkNow.initialize(config:urlSession:)
         let _: Bool = DeepLinkNow.isInitialized
-        let _: (DLNDeferredOptions) async throws -> DeferredDeepLink? = DeepLinkNow.checkDeferredDeepLink
+        let _: (DLNDeferredOptions) async -> DeferredDeepLink? = DeepLinkNow.checkDeferredDeepLink
+        let _: (DLNDeferredOptions) async throws -> DeferredDeepLink? = DeepLinkNow.checkDeferredDeepLinkThrowing
+        let _: DeepLinkNowError? = DeepLinkNow.lastError
         let _: () async -> MatchResponse? = DeepLinkNow.findDeferredUser
         let _: () async throws -> MatchResponse = DeepLinkNow.findDeferredUserThrowing
         let _: () -> String? = DeepLinkNow.checkClipboard

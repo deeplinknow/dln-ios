@@ -77,8 +77,9 @@ public enum DLNQueryValue: Codable, Equatable, Hashable, Sendable {
 
 // MARK: - Errors (SDK-04, SDK-55)
 
-/// Error thrown by the throwing APIs (`initializeThrowing`, `checkDeferredDeepLink`,
-/// `findDeferredUserThrowing`). Codes are the same on every DLN SDK.
+/// Error thrown by the throwing APIs (`initializeThrowing`, `checkDeferredDeepLinkThrowing`,
+/// `findDeferredUserThrowing`) and kept in `DeepLinkNow.lastError` (SDK-85). Codes are the same
+/// on every DLN SDK.
 public struct DeepLinkNowError: Error, CustomStringConvertible, @unchecked Sendable {
     public enum Code: String, Sendable, CaseIterable {
         /// No successful `initialize`. `cause` holds the init failure when there was one.

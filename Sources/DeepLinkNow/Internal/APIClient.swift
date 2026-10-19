@@ -5,6 +5,10 @@ struct APIClient {
     static let defaultBaseUrl = "https://deeplinknow.com"
     static let defaultTimeout: TimeInterval = 10
     static let defaultRetryAttempts = 2
+    /// SDK-53 / IOS-06: `retryAttempts` is clamped to 0...maxRetryAttempts.
+    static let maxRetryAttempts = 5
+    /// SDK-53: no single backoff delay (exponential or Retry-After) exceeds this.
+    static let maxRetryDelay: TimeInterval = 5
 
     let baseUrl: String
     let apiKey: String
@@ -35,7 +39,7 @@ struct APIClient {
         self.baseUrl = base
         self.apiKey = config.apiKey
         self.timeout = (config.timeout ?? 0) > 0 ? config.timeout! : Self.defaultTimeout
-        self.retryAttempts = max(0, config.retryAttempts ?? Self.defaultRetryAttempts)
+        self.retryAttempts = min(max(0, config.retryAttempts ?? Self.defaultRetryAttempts), Self.maxRetryAttempts)
         self.session = session
         self.logger = logger
         self.delayScale = delayScale
@@ -67,11 +71,12 @@ struct APIClient {
                 return try await send(request, endpoint: endpoint)
             } catch let error as Failure {
                 guard error.error.isTransient, attempt < retryAttempts else { throw error.error }
-                let delay = backoff(attempt: attempt, retryAfter: error.retryAfter)
+                let delay = Self.backoff(attempt: attempt, retryAfter: error.retryAfter, delayScale: delayScale)
                 logger.debug("\(endpoint) failed (\(error.error.code.rawValue)); retry \(attempt + 1)/\(retryAttempts) in \(String(format: "%.2f", delay))s")
                 attempt += 1
-                if delay > 0 {
-                    try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                let nanoseconds = Self.sleepNanoseconds(delay)
+                if nanoseconds > 0 {
+                    try? await Task.sleep(nanoseconds: nanoseconds)
                 }
             }
         }
@@ -82,10 +87,18 @@ struct APIClient {
         let retryAfter: TimeInterval?
     }
 
-    private func backoff(attempt: Int, retryAfter: TimeInterval?) -> TimeInterval {
-        let exponential = 0.5 * pow(2.0, Double(attempt))
-        let base = retryAfter.map { min(max($0, 0), 5) } ?? exponential
-        return base * delayScale
+    /// SDK-53: 0.5 s, 1 s, 2 s, 4 s, then 5 s; a finite `Retry-After` replaces it. Every delay
+    /// is capped at `maxRetryDelay`.
+    static func backoff(attempt: Int, retryAfter: TimeInterval?, delayScale: Double) -> TimeInterval {
+        let exponential = 0.5 * pow(2.0, Double(min(max(attempt, 0), 16)))
+        let requested = retryAfter.flatMap { $0.isFinite ? max($0, 0) : nil } ?? exponential
+        return min(requested, maxRetryDelay) * delayScale
+    }
+
+    /// Converts a delay for `Task.sleep` without trapping on NaN, infinity or huge values.
+    static func sleepNanoseconds(_ delay: TimeInterval) -> UInt64 {
+        guard delay.isFinite, delay > 0 else { return 0 }
+        return UInt64(min(delay, maxRetryDelay) * 1_000_000_000)
     }
 
     private func send(_ request: URLRequest, endpoint: String) async throws -> Data {

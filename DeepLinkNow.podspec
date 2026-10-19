@@ -6,7 +6,7 @@
 
 Pod::Spec.new do |s|
   s.name             = 'DeepLinkNow'
-  s.version          = '1.1.0'
+  s.version          = '1.2.0'
   s.summary          = 'DeepLinkNow iOS SDK: privacy-first deferred deep linking'
 
   s.description      = <<-DESC
@@ -18,7 +18,7 @@ Pod::Spec.new do |s|
 
   s.homepage         = 'https://github.com/deeplinknow/dln-ios'
   s.license          = { :type => 'MIT', :file => 'LICENSE.txt' }
-  s.author           = { 'DeepLinkNow' => 'support@deeplink.now' }
+  s.author           = { 'DeepLinkNow' => 'admin@deeplinknow.com' }
 
   s.source           = {
     :git => 'https://github.com/deeplinknow/dln-ios.git',
