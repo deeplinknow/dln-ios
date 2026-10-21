@@ -25,7 +25,7 @@ pod 'DeepLinkNow', '~> 1.2'
 ### Swift Package Manager
 
 ```swift
-.package(url: "https://github.com/deeplinknow/dln-ios.git", from: "1.2.0")
+.package(url: "https://github.com/deeplinknow/dln-ios.git", from: "1.3.0")
 ```
 
 No `Info.plist` keys are needed.

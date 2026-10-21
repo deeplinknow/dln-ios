@@ -49,7 +49,7 @@ pod 'DeepLinkNow', '~> 1.2'
 In Xcode choose **File > Add Package Dependencies...** and enter `https://github.com/deeplinknow/dln-ios`, or add it to `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/deeplinknow/dln-ios.git", from: "1.2.0")
+.package(url: "https://github.com/deeplinknow/dln-ios.git", from: "1.3.0")
 ```
 
 The SDK links only UIKit and Foundation. No `Info.plist` keys are required (iOS has no usage-description key for the pasteboard).
@@ -227,7 +227,7 @@ Keys are case-sensitive. `DLNQueryValue` offers `stringValue` (first value, `nil
 | `createDeepLink(path:customParameters:) -> URL?` | `https://<primary domain><path>?<params>` (primary = first verified custom domain, else `<alias>.deeplinknow.com`). Keys are sorted and strictly encoded, so `parseLink` returns the same path and parameters. `nil` before init. |
 | `isInitialized`, `initializationError`, `appInfo` | Init state. |
 | `lastError: DeepLinkNowError?` | The last failure of `initialize`, `checkDeferredDeepLink` or `findDeferredUser` (either variant); cleared by the next successful call of the same kind. |
-| `sdkVersion` | `"1.2.0"`. |
+| `sdkVersion` | `"1.3.0"`. |
 
 ```swift
 let url = DeepLinkNow.createDeepLink(
