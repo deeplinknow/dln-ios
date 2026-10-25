@@ -19,13 +19,13 @@ On iOS the SDK reads the link the DLN landing page copied to the pasteboard (exa
 ### CocoaPods
 
 ```ruby
-pod 'DeepLinkNow', '~> 1.2'
+pod 'DeepLinkNow', '~> 1.4'
 ```
 
 ### Swift Package Manager
 
 ```swift
-.package(url: "https://github.com/deeplinknow/dln-ios.git", from: "1.3.0")
+.package(url: "https://github.com/deeplinknow/dln-ios.git", from: "1.4.0")
 ```
 
 No `Info.plist` keys are needed.

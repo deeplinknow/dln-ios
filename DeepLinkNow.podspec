@@ -6,7 +6,7 @@
 
 Pod::Spec.new do |s|
   s.name             = 'DeepLinkNow'
-  s.version          = '1.3.0'
+  s.version          = '1.4.0'
   s.summary          = 'DeepLinkNow iOS SDK: privacy-first deferred deep linking'
 
   s.description      = <<-DESC

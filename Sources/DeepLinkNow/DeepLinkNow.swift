@@ -11,7 +11,7 @@ import UIKit
 public final class DeepLinkNow {
 
     /// SDK version. Kept in sync with `DeepLinkNow.podspec` (IOS-01).
-    public static let sdkVersion = "1.3.0"
+    public static let sdkVersion = "1.4.0"
 
     static let deferredCompletedKey = "com.deeplinknow.deferredCheckCompleted"
     static let clipboardCheckedKey = "com.deeplinknow.clipboardChecked"
