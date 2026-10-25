@@ -45,7 +45,10 @@ enum LinkParsing {
         let queryParams: [String: DLNQueryValue]
         let queryOrder: [String]
         let fullPath: String
+        /// The URL with any `dln` fragment parameter removed (SDK-92).
         let url: String
+        /// The click id from a `#dln=<id>` fragment (SDK-92/93), else `nil`.
+        let clickId: String?
     }
 
     /// Parses an absolute http(s) URL on an allowed host. Returns nil for anything else.
@@ -72,7 +75,63 @@ enum LinkParsing {
         if !query.isEmpty { fullPath += "?" + query }
 
         let (params, order) = parseQuery(query)
-        return Parsed(path: path, queryParams: params, queryOrder: order, fullPath: fullPath, url: original)
+        let (url, clickId) = stripClickIdFragment(original)
+        return Parsed(path: path, queryParams: params, queryOrder: order, fullPath: fullPath, url: url, clickId: clickId)
+    }
+
+    /// SDK-92: removes the `dln` parameter from the URL's fragment (`#dln=<id>`, or one of
+    /// several `&`-separated fragment parameters) and returns it. Other fragment content is
+    /// kept; an emptied fragment drops the `#`. The path and query are never touched.
+    static func stripClickIdFragment(_ urlString: String) -> (url: String, clickId: String?) {
+        guard let hash = urlString.firstIndex(of: "#") else { return (urlString, nil) }
+        let base = String(urlString[..<hash])
+        let fragment = urlString[urlString.index(after: hash)...]
+        var clickId: String?
+        var kept: [Substring] = []
+        var removed = false
+        for part in fragment.split(separator: "&", omittingEmptySubsequences: false) {
+            let name = part.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false).first ?? ""
+            if decodeComponent(name) == "dln" {
+                removed = true
+                if clickId == nil, let eq = part.firstIndex(of: "=") {
+                    let value = decodeComponent(part[part.index(after: eq)...])
+                    if !value.isEmpty { clickId = value }
+                }
+            } else {
+                kept.append(part)
+            }
+        }
+        guard removed else { return (urlString, nil) }
+        let rest = kept.filter { !$0.isEmpty }.joined(separator: "&")
+        return (rest.isEmpty ? base : base + "#" + rest, clickId)
+    }
+
+    /// SDK-87: schemes that are never an app's own, even if an app lists them.
+    static let systemSchemes: Set<String> = [
+        "http", "https", "mailto", "tel", "telprompt", "sms", "facetime", "facetime-audio",
+        "content", "file", "intent", "itms", "itms-apps", "itms-appss", "itms-services",
+        "market", "maps", "data", "javascript", "about", "blob", "ftp", "ws", "wss",
+    ]
+
+    /// SDK-87 / IOS-38: `myapp://products/123?x=1` → path `/products/123` (the host is the first
+    /// path segment), query per FLOW-53. `schemes` must be lowercased. A `dln` fragment
+    /// parameter is stripped from `url` as for https links (SDK-92).
+    static func parseScheme(url: URL, schemes: Set<String>) -> Parsed? {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let scheme = components.scheme?.lowercased(),
+              !systemSchemes.contains(scheme), schemes.contains(scheme) else { return nil }
+        let host = components.percentEncodedHost ?? ""
+        var rest = components.percentEncodedPath
+        if !host.isEmpty, !rest.isEmpty, !rest.hasPrefix("/") { rest = "/" + rest }
+        var path = host.isEmpty ? rest : "/" + host + rest
+        if path.isEmpty { path = "/" }
+        if !path.hasPrefix("/") { path = "/" + path }
+        var fullPath = path
+        let query = components.percentEncodedQuery ?? ""
+        if !query.isEmpty { fullPath += "?" + query }
+        let (params, order) = parseQuery(query)
+        let (stripped, clickId) = stripClickIdFragment(url.absoluteString)
+        return Parsed(path: path, queryParams: params, queryOrder: order, fullPath: fullPath, url: stripped, clickId: clickId)
     }
 
     /// `path` = `fullPath` up to the first "?" (or "#"), undecoded, always starting with "/" (SDK-34).

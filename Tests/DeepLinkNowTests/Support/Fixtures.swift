@@ -139,4 +139,37 @@ enum Fixtures {
     }
 
     static let matchEmpty = matchResponse([])
+
+    // MARK: - /api/v1/sdk/referrer-lookup (§2.5, API-SDK-45) and /api/v1/sdk/resolve (§2.8, API-SDK-74)
+
+    static let referrerLookupOK = """
+    {
+      "success": true,
+      "deeplink": {
+        "id": "b2a4f0c6-8d0e-4b4f-a7c1-6c9e3f2d1a00",
+        "target_url": "products/9?ref=nl",
+        "metadata": { "source": "newsletter" },
+        "campaign_id": "3e0b8a51-1c7d-4a2e-b6f9-0d5c4e3b2a19",
+        "matched_at": "2026-10-18T09:20:00.000Z",
+        "expires_at": "2026-10-18T10:20:00.000Z",
+        "query_params": { "ref": "nl" },
+        "full_path": "/products/9?ref=nl"
+      }
+    }
+    """
+
+    static let resolveOK = """
+    {
+      "deeplink": {
+        "id": "b2a4f0c6-8d0e-4b4f-a7c1-6c9e3f2d1a00",
+        "target_url": "https://yourapp.com/invite/8Fk2",
+        "metadata": { "fdl": { "short_link": "https://links.yourapp.com/abc123" } },
+        "campaign_id": "3e0b8a51-1c7d-4a2e-b6f9-0d5c4e3b2a19",
+        "matched_at": "2026-10-18T09:20:00.000Z",
+        "expires_at": "2026-10-18T10:20:00.000Z",
+        "full_path": "/abc123?a=b+c&utm_source=x",
+        "query_params": { "a": "b c", "utm_source": "x" }
+      }
+    }
+    """
 }

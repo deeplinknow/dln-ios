@@ -82,7 +82,7 @@ if let link = await DeepLinkNow.checkDeferredDeepLink() {
 
 What it does:
 
-1. **Pasteboard** (`useClipboard`, default `true`): if the pasteboard holds a link on one of your link domains, that link is returned (`source: .clipboard`) and no match request is made. On iOS 16+ the system may ask the user to allow pasting from Safari; "Don't Allow" just moves on to step 2. A pattern check that does not show the prompt runs first, so there is no prompt when the pasteboard has no web URL.
+1. **Pasteboard** (`useClipboard`, default `true`): if the pasteboard holds a link on one of your link domains, that link is returned (`source: .clipboard`) and no match request is made. On iOS 16+ the system may ask the user to allow pasting from Safari; "Don't Allow" just moves on to step 2. A pattern check that does not show the prompt runs first, so there is no prompt when the pasteboard has no web URL. From 1.4.0, when the copied link carries the click id (`#dln=…`), the SDK claims that click on the server first, so no other device can get it from fingerprinting, and the result gains `deeplinkId`, `targetUrl` and `metadata`. If the server says the click is unknown or already claimed, the link on the pasteboard is stale and the SDK moves on to step 2.
 2. **Fingerprint** (`POST /api/v1/sdk/match`): the first server candidate (sorted by confidence) that has a deep link is returned (`source: .fingerprint`) with the server's `confidenceScore` and `matchQuality` (HIGH ≥ 75, MEDIUM ≥ 50, LOW ≥ 30).
 
 Options (`DLNDeferredOptions`):
@@ -120,6 +120,42 @@ func application(_ application: UIApplication, continue userActivity: NSUserActi
 
 Query parameters follow `URLSearchParams`: `+` is a space, `?flag` and `?flag=` become `.flag`, and a repeated key becomes `.list([...])`. `DLNQueryValue` has `stringValue`, `stringValues` and `anyValue`.
 
+### 4. One handler for every link (1.4.0, not released yet)
+
+`onLink` gives you the deferred link and every Universal Link open as the same `DLNLink`, so you write the routing once:
+
+```swift
+// At launch
+Task { await DeepLinkNow.initialize(config: DLNConfig(apiKey: "dln_pub_…")) }
+DeepLinkNow.onLink { link in            // called on the main actor
+    // link.type    .deferred (first launch after install) or .direct (opened the installed app)
+    // link.source  .clipboard / .fingerprint for deferred, .universalLink for direct
+    router.open(path: link.path, query: link.queryParams)
+}
+
+// SwiftUI: hand every URL that opens the app to the SDK
+.onOpenURL { url in
+    if !DeepLinkNow.handle(url) { /* not one of your link domains: route it yourself */ }
+}
+.onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { activity in
+    if let url = activity.webpageURL { DeepLinkNow.handle(url) }
+}
+
+// UIKit: scene(_:continue:) / application(_:continue:restorationHandler:)
+if let url = userActivity.webpageURL { _ = DeepLinkNow.handle(url) }
+```
+
+Registering the handler runs the first-launch check (the same chain and flag as `checkDeferredDeepLink`), and it waits for `initialize` if you register first. A link that arrives before you register is handed over when you do. The same URL handed in twice within 3 seconds is delivered once.
+
+`handle(_:)` accepts links on your link domains (`source: .universalLink`) and your own URL schemes (`source: .scheme`). By default your schemes are the ones in your Info.plist (`CFBundleURLTypes` → `CFBundleURLSchemes`); pass `schemes: ["myapp"]` to list them yourself. `myapp://products/123?x=1` arrives as `path` `/products/123`. System schemes (`mailto`, `tel`, `https` on other hosts…) return `false`, and you route those yourself.
+
+Options (`DLNLinkOptions`): `minConfidence`, `useClipboard` and `force` go to the deferred check, `schemes` is above, plus:
+
+- `hold: true` keeps links in `DeepLinkNow.pendingLink` instead of calling the handler, e.g. until the user has signed in. `DeepLinkNow.releasePendingLink()` delivers it and ends the hold; `clearPendingLink()` drops it. The SDK keeps the latest deferred link and the latest direct one (`DeepLinkNow.pendingLinks`) and delivers the deferred one first.
+- `resolve: true` looks every direct open up on the server (`GET /api/v1/sdk/resolve`) and fills `deeplinkId`, `targetUrl`, `campaignId` and `metadata` before delivering. It's for short links imported from Firebase, whose path means nothing without the lookup. It adds a request to every open, so it's off by default; if the lookup fails or times out, you get the link unresolved. `await DeepLinkNow.resolveLink(url)` does the same lookup on demand.
+
+`checkDeferredDeepLink` and `parseLink` keep working as before, so you can move over when it suits you.
+
 ### Link domains
 
 After initialization, a link is accepted only when its host exactly equals (ignoring case) one of your app's link domains:
@@ -135,14 +171,14 @@ Other `*.deeplinknow.com` subdomains, the apex `deeplinknow.com` and lookalike h
 |---|---|
 | `DeepLinkNow.findDeferredUserThrowing() async throws -> MatchResponse` | All fingerprint candidates, unfiltered, with `matchQuality`, `deeplink.queryParams`, `deeplink.fullPath`. |
 | `DeepLinkNow.findDeferredUser() async -> MatchResponse?` | Same, `nil` on any error. |
-| `DeepLinkNow.checkClipboard() -> String?` | The pasteboard text if it is exactly one link on your domains. Reads the pasteboard (may prompt). |
+| `DeepLinkNow.checkClipboard() -> String?` | The pasteboard link if the text is exactly one link on your domains (from 1.4.0 without a `#dln=…` click id). Reads the pasteboard (may prompt). |
 | `DeepLinkNow.hasDeepLinkToken() -> Bool` | Cheap hint (`hasURLs`/`hasStrings`), never reads the content, never prompts. |
 | `DeepLinkNow.hasDeepLinkTokenAsync() async -> Bool` | Same, using `detectPatterns(for: [.probableWebURL])` on iOS 14+. |
 | `DeepLinkNow.isValidDomain(_ host:) -> Bool` | The link-domain rule above. |
 | `DeepLinkNow.createDeepLink(path:customParameters:) -> URL?` | An https link on your primary link domain (custom domain if verified) that `parseLink` round-trips. `nil` before init. |
 | `DeepLinkNow.isInitialized`, `initializationError`, `appInfo` | Init state. |
 
-Deprecated: `handleUniversalLink(_:)` (use `parseLink(_:)`; it now returns the parsed link) and `handleCustomScheme(_:)` (custom URL schemes are not supported; it does nothing).
+Deprecated: `handleUniversalLink(_:)` (use `parseLink(_:)`; it now returns the parsed link) and `handleCustomScheme(_:)` (it does nothing; from 1.4.0 pass scheme URLs to `handle(_:)`).
 
 ## Privacy
 

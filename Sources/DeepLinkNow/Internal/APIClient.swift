@@ -65,6 +65,29 @@ struct APIClient {
             throw DeepLinkNowError(.invalidConfiguration, message: "Request body is not valid JSON", underlying: error)
         }
 
+        return try await perform(request, endpoint: endpoint, retryAttempts: retryAttempts)
+    }
+
+    /// GETs `endpoint` with the given query parameters (each name and value strictly
+    /// percent-encoded) and returns the 2xx body. `retryAttempts` overrides the configured
+    /// retries (`0` = a single attempt bounded by the timeout, SDK-90).
+    func get(_ endpoint: String, query: [(String, String)], retryAttempts: Int? = nil) async throws -> Data {
+        let base = try url(for: endpoint).absoluteString
+        let queryString = query
+            .map { "\(LinkParsing.encodeQueryComponent($0.0))=\(LinkParsing.encodeQueryComponent($0.1))" }
+            .joined(separator: "&")
+        guard let url = URL(string: queryString.isEmpty ? base : base + "?" + queryString) else {
+            throw DeepLinkNowError(.invalidConfiguration, message: "Could not build URL for \(endpoint)")
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+        request.timeoutInterval = timeout
+        let retries = min(max(0, retryAttempts ?? self.retryAttempts), Self.maxRetryAttempts)
+        return try await perform(request, endpoint: endpoint, retryAttempts: retries)
+    }
+
+    private func perform(_ request: URLRequest, endpoint: String, retryAttempts: Int) async throws -> Data {
         var attempt = 0
         while true {
             do {

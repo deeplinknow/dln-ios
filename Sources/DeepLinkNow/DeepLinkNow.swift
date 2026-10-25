@@ -89,6 +89,8 @@ public final class DeepLinkNow {
         var logSink: (String) -> Void = { print($0) }
         var retryDelayScale: Double = 1
         var now: () -> Date = Date.init
+        /// The app's custom URL schemes from Info.plist (IOS-38).
+        var declaredURLSchemes: () -> [String] = { DeepLinkNow.infoPlistURLSchemes() }
     }
 
     static let state = Locked(State())
@@ -107,6 +109,7 @@ public final class DeepLinkNow {
             state.deferred?.task.cancel()
             state = State()
         }
+        links.withLock { $0 = LinkState() }
     }
 
     // MARK: - Initialization (SDK-01…09, IOS-05…08)
@@ -131,6 +134,7 @@ public final class DeepLinkNow {
         do {
             let info = try await performInitialize(config: config, urlSession: urlSession)
             recordSuccess(kind: .initialize)
+            startLinkDeferredCheckAfterInit()
             return info
         } catch {
             throw recordFailure(error, kind: .initialize)
@@ -346,6 +350,7 @@ public final class DeepLinkNow {
         state.withLock { s in
             s.deferred = nil
         }
+        links.withLock { $0.deliveredDeferredKeys = [] }
         logger.debug("Deferred deep link state reset")
     }
 
@@ -370,14 +375,28 @@ public final class DeepLinkNow {
                 defaults.set(true, forKey: clipboardCheckedKey)
                 if let text = text, let parsed = validatedClipboardLink(text, domains: client.domains) {
                     log.debug("checkDeferredDeepLink: clipboard hit \(parsed.url)")
-                    defaults.set(true, forKey: deferredCompletedKey)
-                    return DLNDeferredDeepLink(
-                        path: parsed.path, queryParams: parsed.queryParams, fullPath: parsed.fullPath,
-                        url: parsed.url, source: .clipboard, confidenceScore: 100, matchQuality: .high,
-                        deeplinkId: nil, targetUrl: nil, campaignId: nil, metadata: nil,
-                        matchedAt: nil, expiresAt: nil, matchDetails: nil)
+                    // SDK-93 / IOS-35: a copied link carrying `#dln=<click id>` is claimed first.
+                    var server: DeeplinkMatch?
+                    var stale = false
+                    if let clickId = parsed.clickId {
+                        switch await claimClipboardClick(client, clickId: clickId) {
+                        case .claimed(let deeplink):
+                            log.debug("checkDeferredDeepLink: clipboard click claimed")
+                            server = deeplink
+                        case .stale(let status):
+                            log.debug("checkDeferredDeepLink: clipboard link is stale (HTTP \(status)); continuing to /match")
+                            stale = true
+                        case .failed(let error):
+                            log.debug("checkDeferredDeepLink: clipboard claim failed (\(error.code.rawValue)); using the copied link")
+                        }
+                    }
+                    if !stale {
+                        defaults.set(true, forKey: deferredCompletedKey)
+                        return clipboardDeferred(parsed, server: server)
+                    }
+                } else {
+                    log.debug("checkDeferredDeepLink: clipboard has no DLN link")
                 }
-                log.debug("checkDeferredDeepLink: clipboard has no DLN link")
             }
         }
 
@@ -398,6 +417,49 @@ public final class DeepLinkNow {
         }
         log.debug("checkDeferredDeepLink: no eligible fingerprint candidate (\(response.matches.count) returned)")
         return nil
+    }
+
+    /// SDK-17/18 for the clipboard: routing fields from the copied URL; SDK-93: the server
+    /// fields from a successful claim.
+    static func clipboardDeferred(_ parsed: LinkParsing.Parsed, server: DeeplinkMatch?) -> DLNDeferredDeepLink {
+        DLNDeferredDeepLink(
+            path: parsed.path, queryParams: parsed.queryParams, fullPath: parsed.fullPath,
+            url: parsed.url, source: .clipboard, confidenceScore: 100, matchQuality: .high,
+            deeplinkId: server?.id, targetUrl: server?.targetUrl, campaignId: server?.campaignId,
+            metadata: server?.metadata,
+            matchedAt: server.flatMap { $0.matchedAt.isEmpty ? nil : $0.matchedAt },
+            expiresAt: server.flatMap { $0.expiresAt.isEmpty ? nil : $0.expiresAt },
+            matchDetails: nil)
+    }
+
+    enum ClipboardClaim {
+        case claimed(DeeplinkMatch)
+        /// 404 / 410: unknown, expired or already claimed.
+        case stale(Int)
+        /// Anything else (network, timeout, 5xx, unexpected body): fail open.
+        case failed(DeepLinkNowError)
+    }
+
+    /// SDK-93: `GET /api/v1/sdk/referrer-lookup?fp_id=<id>&source=clipboard` (MATCH-71).
+    static func claimClipboardClick(_ client: Client, clickId: String) async -> ClipboardClaim {
+        do {
+            // SDK-93 / IOS-35: the IDFV (same as /init and /match) lets a retry after a lost
+            // response get 200 again instead of 410.
+            var query = [("fp_id", clickId), ("source", "clipboard")]
+            if let deviceId = await MainActor.run(body: { UIDevice.current.identifierForVendor?.uuidString }) {
+                query.append(("device_id", deviceId))
+            }
+            let data = try await get(client.api, "referrer-lookup", query: query)
+            guard let envelope = try? JSONDecoder().decode(DeeplinkEnvelope.self, from: data) else {
+                return .failed(DeepLinkNowError(.invalidResponse, statusCode: 200, message: "Unexpected /referrer-lookup response"))
+            }
+            return .claimed(envelope.deeplink)
+        } catch let error as DeepLinkNowError {
+            if let status = error.statusCode, status == 404 || status == 410 { return .stale(status) }
+            return .failed(error)
+        } catch {
+            return .failed(DeepLinkNowError(.network, underlying: error))
+        }
     }
 
     /// SDK-17/18/19.
@@ -482,6 +544,16 @@ public final class DeepLinkNow {
     private static func post(_ api: APIClient, _ endpoint: String, body: [String: Any]) async throws -> Data {
         do {
             return try await api.post(endpoint, body: body)
+        } catch let error as DeepLinkNowError where error.code == .invalidApiKey || error.code == .accountInactive {
+            InitCache.clear(in: environment.current.defaults)
+            throw error
+        }
+    }
+
+    /// GET counterpart of `post(_:_:body:)`, with the same SDK-83 cache rule.
+    static func get(_ api: APIClient, _ endpoint: String, query: [(String, String)], retryAttempts: Int? = nil) async throws -> Data {
+        do {
+            return try await api.get(endpoint, query: query, retryAttempts: retryAttempts)
         } catch let error as DeepLinkNowError where error.code == .invalidApiKey || error.code == .accountInactive {
             InitCache.clear(in: environment.current.defaults)
             throw error
@@ -597,10 +669,10 @@ public final class DeepLinkNow {
         parseLink(url)
     }
 
-    /// Not supported: DLN links are https Universal Links. Custom URL schemes belong to the app.
-    /// Does nothing; route custom-scheme URLs in your app.
-    @available(*, deprecated, message: "Custom URL schemes are not supported by DeepLinkNow. Use Universal Links and parseLink(_:).")
+    /// Does nothing (IOS-31). Pass custom-scheme URLs to `handle(_:)` instead, which delivers
+    /// them to the `onLink` handler with `source == .scheme` (IOS-38).
+    @available(*, deprecated, message: "Does nothing. Pass the URL to DeepLinkNow.handle(_:) and receive it in onLink.")
     public static func handleCustomScheme(_ url: URL) {
-        logger.debug("handleCustomScheme is not supported; ignoring \(url.scheme ?? "")://")
+        logger.debug("handleCustomScheme does nothing; use handle(_:) for \(url.scheme ?? "")://")
     }
 }
