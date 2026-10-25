@@ -50,7 +50,7 @@ final class PrivacyAndPackagingTests: DLNTestCase {
         XCTAssertTrue(podspec.contains("s.ios.deployment_target = '13.0'"))
         let manifest = try read("Package.swift")
         XCTAssertTrue(manifest.contains(".iOS(.v13)"))
-        XCTAssertEqual(DeepLinkNow.sdkVersion, "1.4.0")
+        XCTAssertEqual(DeepLinkNow.sdkVersion, "1.4.1")
         // deeplink.now is not a DLN domain (SDK-31); the pod author contact must be one we own.
         XCTAssertTrue(podspec.contains("admin@deeplinknow.com"))
         XCTAssertFalse(podspec.contains("deeplink.now"))

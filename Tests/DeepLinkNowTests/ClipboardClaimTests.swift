@@ -81,6 +81,23 @@ final class ClipboardClaimTests: DLNTestCase {
         XCTAssertTrue(defaults.bool(forKey: DeepLinkNow.deferredCompletedKey))
     }
 
+    func test_IOS_35_aClaimedClipboardLinkIsDeliveredWhateverItsAge() async throws {
+        // IOS-35 ("trust the clipboard", owner 2026-10-25): the SDK has no age check of its own.
+        // A 200 for a click days old, whose 1-hour fingerprint window ended long ago, is delivered.
+        fakePasteboard.content = copied
+        let old = Fixtures.referrerLookupOK
+            .replacingOccurrences(of: "2026-10-18T09:20:00.000Z", with: "2026-09-28T09:20:00.000Z")
+            .replacingOccurrences(of: "2026-10-18T10:20:00.000Z", with: "2026-09-28T10:20:00.000Z")
+        StubURLProtocol.stub("referrer-lookup", json: old)
+        StubURLProtocol.stub("match", json: Fixtures.matchResponse([Fixtures.match()]))
+        let linkResult = await DeepLinkNow.checkDeferredDeepLink()
+        let link = try XCTUnwrap(linkResult)
+        XCTAssertEqual(link.source, .clipboard)
+        XCTAssertEqual(link.deeplinkId, "b2a4f0c6-8d0e-4b4f-a7c1-6c9e3f2d1a00")
+        XCTAssertEqual(link.expiresAt, "2026-09-28T10:20:00.000Z")
+        XCTAssertEqual(matchRequests, 0, "the clipboard link beats any fingerprint candidate")
+    }
+
     func test_SDK_93_networkErrorDeliversTheLocallyParsedLink() async throws {
         // SDK-93 / IOS-35: fail open.
         fakePasteboard.content = copied

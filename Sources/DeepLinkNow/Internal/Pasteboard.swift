@@ -38,7 +38,7 @@ final class SystemPasteboard: PasteboardSource {
         // 1 s timeout; "unknown" (nil) means the caller falls back to reading.
         let resumed = Locked(false)
         return await withCheckedContinuation { (continuation: CheckedContinuation<Bool?, Never>) in
-            let finish: (Bool?) -> Void = { value in
+            let finish: @Sendable (Bool?) -> Void = { value in
                 let first = resumed.withLock { done -> Bool in
                     if done { return false }
                     done = true

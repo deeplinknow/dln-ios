@@ -49,7 +49,7 @@ pod 'DeepLinkNow', '~> 1.4'
 In Xcode choose **File > Add Package Dependencies...** and enter `https://github.com/deeplinknow/dln-ios`, or add it to `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/deeplinknow/dln-ios.git", from: "1.4.0")
+.package(url: "https://github.com/deeplinknow/dln-ios.git", from: "1.4.1")
 ```
 
 The SDK links only UIKit and Foundation. No `Info.plist` keys are required (iOS has no usage-description key for the pasteboard).
@@ -184,6 +184,8 @@ func application(_ application: UIApplication, continue userActivity: NSUserActi
 }
 ```
 
+With a scene delegate, a link that launches the app from cold arrives only in `scene(_:willConnectTo:options:)`, as `connectionOptions.userActivities` (Universal Links) or `connectionOptions.urlContexts` (custom schemes); `scene(_:continue:)` and `scene(_:openURLContexts:)` only see links that arrive while the app is running. From 1.4.0 the simpler route is `onLink` with `DeepLinkNow.handle(_:)`; see the README for complete SwiftUI, scene and app-delegate snippets.
+
 `parseLink(_:) -> DLNParsedLink?` is synchronous and side-effect free. It returns `path`, `queryParams`, `fullPath` and `url`, or `nil` when the URL is not an http(s) link on your link domains. The fragment is ignored.
 
 `parseDeepLink(_:) -> (path: String, parameters: [String: Any])?` returns the same data as a tuple (`String`, `true` or `[String]` values).
@@ -227,7 +229,7 @@ Keys are case-sensitive. `DLNQueryValue` offers `stringValue` (first value, `nil
 | `createDeepLink(path:customParameters:) -> URL?` | `https://<primary domain><path>?<params>` (primary = first verified custom domain, else `<alias>.deeplinknow.com`). Keys are sorted and strictly encoded, so `parseLink` returns the same path and parameters. `nil` before init. |
 | `isInitialized`, `initializationError`, `appInfo` | Init state. |
 | `lastError: DeepLinkNowError?` | The last failure of `initialize`, `checkDeferredDeepLink` or `findDeferredUser` (either variant); cleared by the next successful call of the same kind. |
-| `sdkVersion` | `"1.4.0"`. |
+| `sdkVersion` | `"1.4.1"`. |
 
 ```swift
 let url = DeepLinkNow.createDeepLink(
@@ -277,7 +279,7 @@ The legacy `DLNError` enum is unchanged for source compatibility; the new APIs d
 - Collected data: **Device ID** (`identifierForVendor`), purpose App Functionality, not linked to the user's identity, not used for tracking.
 - Required-reason API: `UserDefaults`, reason `CA92.1`.
 
-What the match request sends: a Safari-style user agent, platform `ios`, OS version, device class (`iPhone`/`iPad`), the user's preferred language (`fr-FR` form, from `Locale.preferredLanguages`, so it matches what the browser reported on the link page), IANA time zone, screen width/height in points and scale, CPU core count, install/open timestamps, the IDFV as `device_id`/`vendor_id` (or `null`), `advertising_id: null`, and an informational hash of those values. No IP address is sent (the server sees the connection), and nothing is stored on the device except the first-launch state and the 24-hour `/init` cache. App Store privacy label: "Device ID — App Functionality — not linked — not used for tracking".
+What the match request sends: a Safari-style user agent, platform `ios`, OS version, device class (`iPhone`/`iPad`), the user's preferred language (`fr-FR` form, from `Locale.preferredLanguages`, so it matches what the browser reported on the link page), IANA time zone, screen width/height in points and scale, CPU core count, install/open timestamps, the IDFV as `device_id`/`vendor_id` (or `null`), `advertising_id: null`, and an informational hash of those values. No IP address is sent (the server sees the connection), and nothing is stored on the device except the first-launch state, the 24-hour `/init` cache and, from 1.4.1, a held deferred link that hasn't been delivered yet (at most 24 hours). App Store privacy label: "Device ID — App Functionality — not linked — not used for tracking".
 
 ## Migrating from 1.0.x
 

@@ -1,7 +1,11 @@
 import Foundation
 
 /// HTTP client for `/api/v1/sdk/*` (SDK-01/02/52/53/55, IOS-05/06).
-struct APIClient {
+///
+/// Immutable, so it crosses task boundaries (IOS-10). `@unchecked` only because of `session`:
+/// a `URLSession` (thread-safe) or the app's own `URLSessionProtocol`, which the SDK has always
+/// called from any task.
+struct APIClient: @unchecked Sendable {
     static let defaultBaseUrl = "https://deeplinknow.com"
     static let defaultTimeout: TimeInterval = 10
     static let defaultRetryAttempts = 2

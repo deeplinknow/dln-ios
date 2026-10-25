@@ -1,6 +1,7 @@
 import Foundation
+import UIKit
 
-// MARK: - One link object for every open (SDK-86…91, IOS-32…34, IOS-36…38)
+// MARK: - One link object for every open (SDK-86…91, IOS-32…34, IOS-36…41)
 
 extension DeepLinkNow {
 
@@ -22,6 +23,16 @@ extension DeepLinkNow {
         var lastDirectAt: Date?
         /// IOS-34: `onLink` was registered before a successful init; run the deferred check after it.
         var waitingForInit = false
+        /// IOS-41 / SDK-24: the handler's deferred check failed; run it again on the next
+        /// `onLink` or successful `initialize`, and (after a transient failure) when the app
+        /// next becomes active.
+        var retryAfterFailure = false
+        var retryWhenActive = false
+        /// The latest handler check; only its failure arms a retry (a check from before
+        /// `resetForTesting` must not).
+        var checkId: UUID?
+        /// IOS-40: the saved deferred link has been looked for in this process.
+        var savedLinkRestored = false
     }
 
     /// SDK-89: the latest link of each kind (one deferred, one direct), handed over deferred first.
@@ -43,6 +54,10 @@ extension DeepLinkNow {
 
     static let links = Locked(LinkState())
 
+    /// IOS-41: the `didBecomeActive` observer, added the first time a check fails. Kept outside
+    /// `LinkState` so resetting the state never adds a second one.
+    static let activationObserver = Locked<NSObjectProtocol?>(nil)
+
     /// SDK-88 / IOS-33: the same URL handed to `handle(_:)` again within this many seconds is
     /// the OS (or the app's several entry points) replaying one open.
     static let directDedupeWindow: TimeInterval = 3
@@ -63,6 +78,7 @@ extension DeepLinkNow {
     ///
     /// Calling it again replaces the handler and options. Never throws (SDK-85).
     public static func onLink(options: DLNLinkOptions = DLNLinkOptions(), _ handler: @escaping @MainActor (DLNLink) -> Void) {
+        restoreSavedDeferredLink()
         let waiting: [DLNLink] = links.withLock { s in
             s.handler = handler
             s.options = options
@@ -78,9 +94,15 @@ extension DeepLinkNow {
         startLinkDeferredCheck()
     }
 
-    /// Hands a URL that opened the app to the SDK (SDK-87): call it from `.onOpenURL`,
-    /// `.onContinueUserActivity(NSUserActivityTypeBrowsingWeb)`, `scene(_:continue:)`,
-    /// `scene(_:openURLContexts:)` or `application(_:continue:restorationHandler:)`.
+    /// Hands a URL that opened the app to the SDK (SDK-87). Call it wherever iOS gives the app
+    /// a URL (IOS-39):
+    ///
+    /// - SwiftUI: `.onOpenURL` and `.onContinueUserActivity(NSUserActivityTypeBrowsingWeb)`.
+    /// - UIKit with scenes: `scene(_:willConnectTo:options:)` (a cold launch delivers the URL
+    ///   only here; pass the options to `handle(_:)` as they are), `scene(_:continue:)` and
+    ///   `scene(_:openURLContexts:)`.
+    /// - UIKit without scenes: `application(_:continue:restorationHandler:)` for Universal Links
+    ///   and `application(_:open:options:)` for custom schemes.
     ///
     /// Returns `true` and delivers a `DLNLink` (`type == .direct`) when the URL is a link on the
     /// app's domains (the `parseLink(_:)` rules, `source == .universalLink`) or uses one of the
@@ -114,6 +136,39 @@ extension DeepLinkNow {
         return true
     }
 
+    /// `handle(_:)` for a Universal Link activity (IOS-39), from `scene(_:continue:)`,
+    /// `application(_:continue:restorationHandler:)` or `.onContinueUserActivity`. Returns
+    /// `false` for any activity that is not `NSUserActivityTypeBrowsingWeb` with a `webpageURL`.
+    @discardableResult
+    public static func handle(_ userActivity: NSUserActivity) -> Bool {
+        guard userActivity.activityType == NSUserActivityTypeBrowsingWeb,
+              let url = userActivity.webpageURL else { return false }
+        return handle(url)
+    }
+
+    #if os(iOS)
+    /// `handle(_:)` for a scene's launch options (IOS-39). On a cold launch iOS hands a scene
+    /// app its Universal Link (`userActivities`) or custom-scheme URL (`urlContexts`) only in
+    /// `scene(_:willConnectTo:options:)`, not in `scene(_:continue:)` /
+    /// `scene(_:openURLContexts:)`, so pass `connectionOptions` here. Returns `true` when any of
+    /// them was a link for the app.
+    @available(iOS 13.0, macCatalyst 13.1, *)
+    @MainActor
+    @discardableResult
+    public static func handle(_ connectionOptions: UIScene.ConnectionOptions) -> Bool {
+        handleLaunch(activities: Array(connectionOptions.userActivities),
+                     urls: connectionOptions.urlContexts.map { $0.url })
+    }
+    #endif
+
+    /// The launch activities, then the launch URLs, each through `handle(_:)`.
+    static func handleLaunch(activities: [NSUserActivity], urls: [URL]) -> Bool {
+        var handled = false
+        for activity in activities where handle(activity) { handled = true }
+        for url in urls where handle(url) { handled = true }
+        return handled
+    }
+
     /// The held link that `releasePendingLink()` would deliver first (SDK-89): the held
     /// deferred link, else the held direct one. See `pendingLinks` for both.
     public static var pendingLink: DLNLink? {
@@ -136,33 +191,43 @@ extension DeepLinkNow {
         for link in held { route(link) }
     }
 
-    /// Drops the held links without delivering them (SDK-89). The hold stays on.
+    /// Drops the held links without delivering them (SDK-89). The hold stays on. A held
+    /// deferred link saved for the next launch (IOS-40) is deleted too.
     public static func clearPendingLink() {
-        links.withLock { $0.pending = HeldLinks() }
+        let defaults = environment.withLock { $0.defaults }
+        links.withLock { s in
+            s.pending = HeldLinks()
+            if s.undelivered.deferred == nil { SavedDeferredLink.clear(in: defaults) }
+        }
     }
 
     /// Looks a link on the app's domains up with `GET /api/v1/sdk/resolve` (SDK-90) and
     /// returns it with `deeplinkId`, `targetUrl`, `campaignId` and `metadata` filled from the
     /// stored link. A 404, a timeout or any error returns the link unresolved. Returns `nil`
-    /// only when the URL is not a link on the app's domains. Never throws (SDK-85).
+    /// only when the URL is not a link on the app's domains. The whole call, including waiting
+    /// for an `initialize` still in flight, takes at most `DLNConfig.timeout` (IOS-37); if init
+    /// hasn't answered by then, the domains saved by the last `/init` decide. Never throws (SDK-85).
     public static func resolveLink(_ url: URL) async -> DLNLink? {
-        let domains = (try? await requireClient())?.domains ?? handleDomains
-        if let link = directLink(url, domains: domains) { return await resolveOrKeep(link) }
-        // A scheme open is the app's link but is never resolved (SDK-87).
-        return schemeLink(url, schemes: links.withLock { $0.options.schemes })
+        let schemes = links.withLock { $0.options.schemes }
+        let early = directLink(url, domains: handleDomains) ?? schemeLink(url, schemes: schemes)
+        return await withDeadline(seconds: resolveTimeout, fallback: early) {
+            let domains = (try? await requireClient())?.domains ?? handleDomains
+            if let link = directLink(url, domains: domains) { return await resolveOnce(link) }
+            // A scheme open is the app's link but is never resolved (SDK-87).
+            return schemeLink(url, schemes: schemes)
+        }
     }
 
     // MARK: Delivery
 
     /// Hands a link to the handler, or holds it, or keeps it for a late handler.
+    /// A deferred link that has to wait is also saved for the next launch (IOS-40).
     static func route(_ link: DLNLink) {
+        let (defaults, now) = environment.withLock { ($0.defaults, $0.now) }
         let drain: Bool = links.withLock { s in
-            if s.holding {
-                s.pending.put(link)
-                return false
-            }
-            if s.handler == nil {
-                s.undelivered.put(link)
+            if s.holding || s.handler == nil {
+                if s.holding { s.pending.put(link) } else { s.undelivered.put(link) }
+                if link.type == .deferred { SavedDeferredLink(link, savedAt: now()).save(to: defaults) }
                 return false
             }
             s.queue.append(link)
@@ -175,10 +240,16 @@ extension DeepLinkNow {
 
     /// Calls the handler for every queued link, in order, on the main actor.
     @MainActor static func drainLinkQueue() {
+        let defaults = environment.withLock { $0.defaults }
         while true {
             let next: (DLNLink, @MainActor (DLNLink) -> Void)? = links.withLock { s in
                 guard let handler = s.handler, !s.queue.isEmpty else { return nil }
-                return (s.queue.removeFirst(), handler)
+                let link = s.queue.removeFirst()
+                // IOS-40: delivered, so the next launch must not hand it over again.
+                if link.type == .deferred && s.pending.deferred == nil && s.undelivered.deferred == nil {
+                    SavedDeferredLink.clear(in: defaults)
+                }
+                return (link, handler)
             }
             guard let item = next else { return }
             item.1(item.0)
@@ -188,16 +259,44 @@ extension DeepLinkNow {
     /// SDK-88: a deferred link is delivered at most once per process.
     static func deliverDeferred(_ deferred: DLNDeferredDeepLink) {
         let link = DLNLink(deferred)
-        let key = "\(link.source.rawValue)|\(link.deeplinkId ?? "")|\(link.url)"
         let fresh: Bool = links.withLock { s in
-            s.deliveredDeferredKeys.insert(key).inserted
+            s.deliveredDeferredKeys.insert(deferredKey(link)).inserted
         }
         if fresh { route(link) }
+    }
+
+    static func deferredKey(_ link: DLNLink) -> String {
+        "\(link.source.rawValue)|\(link.deeplinkId ?? "")|\(link.url)"
+    }
+
+    /// IOS-40: once per process, a deferred link saved on an earlier launch (held, or with no
+    /// handler, when the app was killed) goes back to the links waiting for the handler.
+    static func restoreSavedDeferredLink() {
+        let (defaults, now) = environment.withLock { ($0.defaults, $0.now) }
+        let restored: DLNLink? = links.withLock { s in
+            guard !s.savedLinkRestored else { return nil }
+            s.savedLinkRestored = true
+            guard let saved = SavedDeferredLink.load(from: defaults) else { return nil }
+            guard saved.isUsable(now: now()) else {
+                SavedDeferredLink.clear(in: defaults)
+                return nil
+            }
+            guard s.pending.deferred == nil, s.undelivered.deferred == nil else { return nil }
+            let link = saved.link
+            s.deliveredDeferredKeys.insert(deferredKey(link))
+            s.undelivered.put(link)
+            return link
+        }
+        if let link = restored { logger.debug("onLink: restored the undelivered deferred link \(link.fullPath)") }
     }
 
     // MARK: Deferred check for the handler (SDK-86, IOS-34)
 
     static func startLinkDeferredCheck() {
+        links.withLock { s in
+            s.retryAfterFailure = false
+            s.retryWhenActive = false
+        }
         let ready = state.withLock { $0.client != nil || $0.inFlight != nil }
         if ready {
             Task { await runLinkDeferredCheck() }
@@ -214,11 +313,13 @@ extension DeepLinkNow {
         if isInitialized { startLinkDeferredCheckAfterInit() }
     }
 
-    /// Called after every successful initialize.
+    /// Called after every successful initialize. Also re-runs a check that failed (IOS-41).
     static func startLinkDeferredCheckAfterInit() {
         let run: Bool = links.withLock { s in
-            let waiting = s.waitingForInit
+            let waiting = s.waitingForInit || s.retryAfterFailure
             s.waitingForInit = false
+            s.retryAfterFailure = false
+            s.retryWhenActive = false
             return waiting
         }
         if run {
@@ -227,7 +328,11 @@ extension DeepLinkNow {
     }
 
     static func runLinkDeferredCheck() async {
-        let options = links.withLock { $0.options }
+        let id = UUID()
+        let options: DLNLinkOptions = links.withLock { s in
+            s.checkId = id
+            return s.options
+        }
         do {
             if let deferred = try await checkDeferredDeepLinkThrowing(options.deferredOptions) {
                 deliverDeferred(deferred)
@@ -237,6 +342,41 @@ extension DeepLinkNow {
             waitForInitThenCheck()
         } catch {
             logger.warn("onLink: deferred check failed: \(error)")
+            retryLinkDeferredCheckLater(checkId: id, transient: (error as? DeepLinkNowError)?.isTransient ?? true)
+        }
+    }
+
+    /// IOS-41 / SDK-24: a failed check runs again on the next `onLink` or successful
+    /// `initialize`; after a network error, 5xx or 429 also when the app next becomes active
+    /// (the user back from Settings, or Wi-Fi turned on from Control Center).
+    static func retryLinkDeferredCheckLater(checkId: UUID, transient: Bool) {
+        let current: Bool = links.withLock { s in
+            guard s.checkId == checkId else { return false }
+            s.retryAfterFailure = true
+            s.retryWhenActive = transient
+            return true
+        }
+        guard current, transient else { return }
+        activationObserver.withLock { observer in
+            guard observer == nil else { return }
+            observer = NotificationCenter.default.addObserver(
+                forName: UIApplication.didBecomeActiveNotification, object: nil, queue: nil
+            ) { _ in
+                retryFailedLinkDeferredCheckWhenActive()
+            }
+        }
+    }
+
+    static func retryFailedLinkDeferredCheckWhenActive() {
+        let run: Bool = links.withLock { s in
+            guard s.retryWhenActive else { return false }
+            s.retryAfterFailure = false
+            s.retryWhenActive = false
+            return true
+        }
+        if run {
+            logger.debug("onLink: retrying the deferred check that failed")
+            Task { await runLinkDeferredCheck() }
         }
     }
 
@@ -283,41 +423,63 @@ extension DeepLinkNow {
                        campaignId: nil, metadata: nil, matchedAt: nil, expiresAt: nil, matchDetails: nil)
     }
 
-    /// SDK-90: one `/sdk/resolve` attempt, bounded by the configured timeout as a whole.
-    /// Any failure keeps the link unresolved.
+    /// IOS-37: `DLNConfig.timeout` of the current client, else of the init in flight.
+    static var resolveTimeout: TimeInterval {
+        state.withLock { $0.client?.api.timeout ?? $0.inFlight?.timeout } ?? APIClient.defaultTimeout
+    }
+
+    /// SDK-90: one `/sdk/resolve` attempt, bounded by the configured timeout as a whole,
+    /// including the wait for an init in flight (IOS-37). Any failure keeps the link unresolved.
     static func resolveOrKeep(_ link: DLNLink) async -> DLNLink {
-        let timeout = state.withLock { $0.client?.api.timeout } ?? APIClient.defaultTimeout
-        let log = logger
-        return await withDeadline(seconds: timeout, fallback: link) {
-            do {
-                let client = try await requireClient()
-                let data = try await get(client.api, "resolve", query: [("path", link.fullPath)], retryAttempts: 0)
-                guard let envelope = try? JSONDecoder().decode(DeeplinkEnvelope.self, from: data) else {
-                    log.debug("resolve: unexpected response; delivering \(link.fullPath) unresolved")
-                    return link
-                }
-                return link.resolved(with: envelope.deeplink)
-            } catch {
-                let code = (error as? DeepLinkNowError).map { e in e.statusCode.map(String.init) ?? e.code.rawValue } ?? "error"
-                log.debug("resolve: \(link.fullPath) not resolved (\(code)); delivering it unresolved")
+        await withDeadline(seconds: resolveTimeout, fallback: link) { await resolveOnce(link) }
+    }
+
+    static func resolveOnce(_ link: DLNLink) async -> DLNLink {
+        do {
+            let client = try await requireClient()
+            let data = try await get(client.api, "resolve", query: [("path", link.fullPath)], retryAttempts: 0)
+            guard let envelope = try? JSONDecoder().decode(DeeplinkEnvelope.self, from: data) else {
+                logger.debug("resolve: unexpected response; delivering \(link.fullPath) unresolved")
                 return link
             }
+            return link.resolved(with: envelope.deeplink)
+        } catch {
+            let code = (error as? DeepLinkNowError).map { e in e.statusCode.map(String.init) ?? e.code.rawValue } ?? "error"
+            logger.debug("resolve: \(link.fullPath) not resolved (\(code)); delivering it unresolved")
+            return link
         }
     }
 
-    /// Runs `operation`, returning `fallback` if it has not finished after `seconds`.
-    static func withDeadline<T>(seconds: TimeInterval, fallback: T, _ operation: @escaping () async -> T) async -> T {
-        await withTaskGroup(of: T?.self) { group in
-            group.addTask { await operation() }
-            group.addTask {
-                // Bounded and finite, so the conversion cannot trap (SDK-50).
-                let bounded = seconds.isFinite ? min(max(seconds, 0), 600) : APIClient.defaultTimeout
-                if bounded > 0 { try? await Task.sleep(nanoseconds: UInt64(bounded * 1_000_000_000)) }
-                return nil
+    /// Runs `operation`, returning `fallback` once `seconds` have passed if it has not finished
+    /// (IOS-37). The caller never waits for the loser: `operation` runs in its own task, which
+    /// is cancelled on timeout but may ignore that (e.g. awaiting an init in flight).
+    static func withDeadline<T: Sendable>(seconds: TimeInterval, fallback: T, _ operation: @escaping @Sendable () async -> T) async -> T {
+        // Bounded and finite, so the conversion cannot trap (SDK-50).
+        let bounded = seconds.isFinite ? min(max(seconds, 0), 600) : APIClient.defaultTimeout
+        let pending = Locked<CheckedContinuation<T, Never>?>(nil)
+        let work = Locked<Task<Void, Never>?>(nil)
+        // Resumes the caller once: the first of the operation and the timer wins.
+        let finish: @Sendable (T) -> Void = { value in
+            let continuation = pending.withLock { c -> CheckedContinuation<T, Never>? in
+                defer { c = nil }
+                return c
             }
-            let first = await group.next() ?? nil
-            group.cancelAll()
-            return first ?? fallback
+            continuation?.resume(returning: value)
+        }
+        return await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
+            pending.withLock { $0 = continuation }
+            let timer = Task {
+                if bounded > 0 { try? await Task.sleep(nanoseconds: UInt64(bounded * 1_000_000_000)) }
+                guard !Task.isCancelled else { return }
+                finish(fallback)
+                work.withLock { $0 }?.cancel()
+            }
+            let task = Task {
+                let value = await operation()
+                timer.cancel()
+                finish(value)
+            }
+            work.withLock { $0 = task }
         }
     }
 }

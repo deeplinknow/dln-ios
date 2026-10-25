@@ -25,7 +25,7 @@ pod 'DeepLinkNow', '~> 1.4'
 ### Swift Package Manager
 
 ```swift
-.package(url: "https://github.com/deeplinknow/dln-ios.git", from: "1.4.0")
+.package(url: "https://github.com/deeplinknow/dln-ios.git", from: "1.4.1")
 ```
 
 No `Info.plist` keys are needed.
@@ -82,7 +82,7 @@ if let link = await DeepLinkNow.checkDeferredDeepLink() {
 
 What it does:
 
-1. **Pasteboard** (`useClipboard`, default `true`): if the pasteboard holds a link on one of your link domains, that link is returned (`source: .clipboard`) and no match request is made. On iOS 16+ the system may ask the user to allow pasting from Safari; "Don't Allow" just moves on to step 2. A pattern check that does not show the prompt runs first, so there is no prompt when the pasteboard has no web URL. From 1.4.0, when the copied link carries the click id (`#dln=…`), the SDK claims that click on the server first, so no other device can get it from fingerprinting, and the result gains `deeplinkId`, `targetUrl` and `metadata`. If the server says the click is unknown or already claimed, the link on the pasteboard is stale and the SDK moves on to step 2.
+1. **Pasteboard** (`useClipboard`, default `true`): if the pasteboard holds a link on one of your link domains, that link is returned (`source: .clipboard`) and no match request is made. On iOS 16+ the system may ask the user to allow pasting from Safari; "Don't Allow" just moves on to step 2. A pattern check that does not show the prompt runs first, so there is no prompt when the pasteboard has no web URL. From 1.4.0, when the copied link carries the click id (`#dln=…`), the SDK claims that click on the server first, so no other device can get it from fingerprinting, and the result gains `deeplinkId`, `targetUrl` and `metadata`. The copied link counts for as long as DLN keeps the click (30 days), and it wins over a fingerprint match. If the server doesn't know the click, or another device claimed it, the SDK moves on to step 2. If the server can't be reached, you still get the copied link.
 2. **Fingerprint** (`POST /api/v1/sdk/match`): the first server candidate (sorted by confidence) that has a deep link is returned (`source: .fingerprint`) with the server's `confidenceScore` and `matchQuality` (HIGH ≥ 75, MEDIUM ≥ 50, LOW ≥ 30).
 
 Options (`DLNDeferredOptions`):
@@ -120,7 +120,7 @@ func application(_ application: UIApplication, continue userActivity: NSUserActi
 
 Query parameters follow `URLSearchParams`: `+` is a space, `?flag` and `?flag=` become `.flag`, and a repeated key becomes `.list([...])`. `DLNQueryValue` has `stringValue`, `stringValues` and `anyValue`.
 
-### 4. One handler for every link (1.4.0, not released yet)
+### 4. One handler for every link (1.4.0)
 
 `onLink` gives you the deferred link and every Universal Link open as the same `DLNLink`, so you write the routing once:
 
@@ -133,26 +133,66 @@ DeepLinkNow.onLink { link in            // called on the main actor
     router.open(path: link.path, query: link.queryParams)
 }
 
-// SwiftUI: hand every URL that opens the app to the SDK
-.onOpenURL { url in
-    if !DeepLinkNow.handle(url) { /* not one of your link domains: route it yourself */ }
-}
-.onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { activity in
-    if let url = activity.webpageURL { DeepLinkNow.handle(url) }
-}
-
-// UIKit: scene(_:continue:) / application(_:continue:restorationHandler:)
-if let url = userActivity.webpageURL { _ = DeepLinkNow.handle(url) }
 ```
 
-Registering the handler runs the first-launch check (the same chain and flag as `checkDeferredDeepLink`), and it waits for `initialize` if you register first. A link that arrives before you register is handed over when you do. The same URL handed in twice within 3 seconds is delivered once.
+Then hand every URL that opens the app to the SDK. Where iOS delivers it depends on how your app is built.
+
+SwiftUI:
+
+```swift
+WindowGroup {
+    ContentView()
+        .onOpenURL { url in
+            if !DeepLinkNow.handle(url) { /* not one of your links: route it yourself */ }
+        }
+        .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { activity in
+            DeepLinkNow.handle(activity)
+        }
+}
+```
+
+UIKit with a scene delegate. When the link launches the app from cold, iOS hands it over only in `scene(_:willConnectTo:options:)`, never in the other two methods, so all three are needed:
+
+```swift
+func scene(_ scene: UIScene, willConnectTo session: UISceneSession,
+           options connectionOptions: UIScene.ConnectionOptions) {
+    // … your window setup …
+    DeepLinkNow.handle(connectionOptions)   // Universal Link or custom-scheme URL from a cold launch
+}
+
+func scene(_ scene: UIScene, continue userActivity: NSUserActivity) {
+    DeepLinkNow.handle(userActivity)        // Universal Link, app already running
+}
+
+func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) {
+    for context in URLContexts { DeepLinkNow.handle(context.url) }   // custom scheme, app already running
+}
+```
+
+UIKit without scenes (app delegate only):
+
+```swift
+func application(_ application: UIApplication, continue userActivity: NSUserActivity,
+                 restorationHandler: @escaping ([UIUserActivityRestoring]?) -> Void) -> Bool {
+    DeepLinkNow.handle(userActivity)        // Universal Links, cold launch included
+}
+
+func application(_ app: UIApplication, open url: URL,
+                 options: [UIApplication.OpenURLOptionsKey: Any] = [:]) -> Bool {
+    DeepLinkNow.handle(url)                 // custom schemes, cold launch included
+}
+```
+
+Each `handle` returns `false` for anything that isn't your link, so you can route those yourself. `handle(_ userActivity:)` and `handle(_ connectionOptions:)` are new in 1.4.1; on 1.4.0 pass `userActivity.webpageURL`, or each `connectionOptions.userActivities` and `connectionOptions.urlContexts` URL, to `handle(_ url:)`.
+
+Registering the handler runs the first-launch check (the same chain and flag as `checkDeferredDeepLink`), and it waits for `initialize` if you register first. If the check fails (offline, say), it runs again the next time you call `onLink` or `initialize`, or when the app next becomes active. A link that arrives before you register is handed over when you do. The same URL handed in twice within 3 seconds is delivered once.
 
 `handle(_:)` accepts links on your link domains (`source: .universalLink`) and your own URL schemes (`source: .scheme`). By default your schemes are the ones in your Info.plist (`CFBundleURLTypes` → `CFBundleURLSchemes`); pass `schemes: ["myapp"]` to list them yourself. `myapp://products/123?x=1` arrives as `path` `/products/123`. System schemes (`mailto`, `tel`, `https` on other hosts…) return `false`, and you route those yourself.
 
 Options (`DLNLinkOptions`): `minConfidence`, `useClipboard` and `force` go to the deferred check, `schemes` is above, plus:
 
-- `hold: true` keeps links in `DeepLinkNow.pendingLink` instead of calling the handler, e.g. until the user has signed in. `DeepLinkNow.releasePendingLink()` delivers it and ends the hold; `clearPendingLink()` drops it. The SDK keeps the latest deferred link and the latest direct one (`DeepLinkNow.pendingLinks`) and delivers the deferred one first.
-- `resolve: true` looks every direct open up on the server (`GET /api/v1/sdk/resolve`) and fills `deeplinkId`, `targetUrl`, `campaignId` and `metadata` before delivering. It's for short links imported from Firebase, whose path means nothing without the lookup. It adds a request to every open, so it's off by default; if the lookup fails or times out, you get the link unresolved. `await DeepLinkNow.resolveLink(url)` does the same lookup on demand.
+- `hold: true` keeps links in `DeepLinkNow.pendingLink` instead of calling the handler, e.g. until the user has signed in. `DeepLinkNow.releasePendingLink()` delivers it and ends the hold; `clearPendingLink()` drops it. The SDK keeps the latest deferred link and the latest direct one (`DeepLinkNow.pendingLinks`) and delivers the deferred one first. A held deferred link is also saved on the device, so if iOS kills the app while the user is off fetching a sign-in code, it's back in `pendingLink` after the next `onLink` (for up to 24 hours).
+- `resolve: true` looks every direct open up on the server (`GET /api/v1/sdk/resolve`) and fills `deeplinkId`, `targetUrl`, `campaignId` and `metadata` before delivering. It's for short links imported from Firebase, whose path means nothing without the lookup. It adds a request to every open, so it's off by default; if the lookup fails or times out, you get the link unresolved. The wait never runs past `DLNConfig.timeout`, even while `initialize` is still running. `await DeepLinkNow.resolveLink(url)` does the same lookup on demand.
 
 `checkDeferredDeepLink` and `parseLink` keep working as before, so you can move over when it suits you.
 
@@ -188,7 +228,7 @@ The SDK ships a `PrivacyInfo.xcprivacy`:
 - Collected: Device ID (the `identifierForVendor`, IDFV) for App Functionality, not linked to identity, not used for tracking. The server uses it to claim a click for this install.
 - Required-reason API: `UserDefaults` (`CA92.1`) for the first-launch state.
 
-The match request sends: a Safari-style user agent, `ios`, OS version, device class (`iPhone`/`iPad`), locale, time zone, screen size in points and scale, CPU core count, and the IDFV. It never reads the IDFA, never links AdSupport or AppTrackingTransparency, and never sends an IP address (the server sees the connection). Nothing is stored on the device except the first-launch state and a copy of the last `/init` result (your public key, link domains and app info, no device data), which lets a launch within 24 hours skip the network call.
+The match request sends: a Safari-style user agent, `ios`, OS version, device class (`iPhone`/`iPad`), locale, time zone, screen size in points and scale, CPU core count, and the IDFV. It never reads the IDFA, never links AdSupport or AppTrackingTransparency, and never sends an IP address (the server sees the connection). Nothing is stored on the device except the first-launch state, a copy of the last `/init` result (your public key, link domains and app info, no device data), which lets a launch within 24 hours skip the network call, and a held deferred link that hasn't been delivered yet (the path and query the user tapped, kept for at most 24 hours).
 
 ## Documentation
 

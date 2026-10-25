@@ -11,7 +11,7 @@ import UIKit
 public final class DeepLinkNow {
 
     /// SDK version. Kept in sync with `DeepLinkNow.podspec` (IOS-01).
-    public static let sdkVersion = "1.4.0"
+    public static let sdkVersion = "1.4.1"
 
     static let deferredCompletedKey = "com.deeplinknow.deferredCheckCompleted"
     static let clipboardCheckedKey = "com.deeplinknow.clipboardChecked"
@@ -20,8 +20,8 @@ public final class DeepLinkNow {
 
     // MARK: - Internal state
 
-    /// A successfully initialized configuration. Immutable once built.
-    final class Client {
+    /// A successfully initialized configuration. Immutable once built (IOS-10).
+    final class Client: Sendable {
         let api: APIClient
         let appInfo: DLNAppInfo
         let domains: Set<String>
@@ -39,6 +39,8 @@ public final class DeepLinkNow {
         let id: UUID
         let apiKey: String
         let baseUrl: String
+        /// `DLNConfig.timeout`, so a resolve that waits for this init is bounded by it (IOS-37).
+        let timeout: TimeInterval
         let task: Task<Client, Error>
     }
 
@@ -86,7 +88,7 @@ public final class DeepLinkNow {
     struct Environment {
         var defaults: UserDefaults = .standard
         var pasteboard: PasteboardSource = SystemPasteboard()
-        var logSink: (String) -> Void = { print($0) }
+        var logSink: @Sendable (String) -> Void = { print($0) }
         var retryDelayScale: Double = 1
         var now: () -> Date = Date.init
         /// The app's custom URL schemes from Info.plist (IOS-38).
@@ -168,7 +170,7 @@ public final class DeepLinkNow {
             }
             let id = UUID()
             let task = Task<Client, Error> { try await performInit(api: api, logger: configLogger) }
-            s.inFlight = InFlightInit(id: id, apiKey: api.apiKey, baseUrl: api.baseUrl, task: task)
+            s.inFlight = InFlightInit(id: id, apiKey: api.apiKey, baseUrl: api.baseUrl, timeout: api.timeout, task: task)
             return (id, task)
         }
 
@@ -347,10 +349,14 @@ public final class DeepLinkNow {
         defaults.removeObject(forKey: deferredCompletedKey)
         defaults.removeObject(forKey: clipboardCheckedKey)
         InitCache.clear(in: defaults)
+        SavedDeferredLink.clear(in: defaults)
         state.withLock { s in
             s.deferred = nil
         }
-        links.withLock { $0.deliveredDeferredKeys = [] }
+        links.withLock { s in
+            s.deliveredDeferredKeys = []
+            s.retryAfterFailure = false
+        }
         logger.debug("Deferred deep link state reset")
     }
 
@@ -376,6 +382,8 @@ public final class DeepLinkNow {
                 if let text = text, let parsed = validatedClipboardLink(text, domains: client.domains) {
                     log.debug("checkDeferredDeepLink: clipboard hit \(parsed.url)")
                     // SDK-93 / IOS-35: a copied link carrying `#dln=<click id>` is claimed first.
+                    // The SDK never judges the link's age itself: the server answers 200 for
+                    // any click it still holds (30 days) that no other device has claimed.
                     var server: DeeplinkMatch?
                     var stale = false
                     if let clickId = parsed.clickId {
@@ -384,7 +392,7 @@ public final class DeepLinkNow {
                             log.debug("checkDeferredDeepLink: clipboard click claimed")
                             server = deeplink
                         case .stale(let status):
-                            log.debug("checkDeferredDeepLink: clipboard link is stale (HTTP \(status)); continuing to /match")
+                            log.debug("checkDeferredDeepLink: clipboard click is unknown, older than 30 days or claimed by another device (HTTP \(status)); continuing to /match")
                             stale = true
                         case .failed(let error):
                             log.debug("checkDeferredDeepLink: clipboard claim failed (\(error.code.rawValue)); using the copied link")
@@ -434,7 +442,7 @@ public final class DeepLinkNow {
 
     enum ClipboardClaim {
         case claimed(DeeplinkMatch)
-        /// 404 / 410: unknown, expired or already claimed.
+        /// 404 / 410: unknown, past the 30-day record life, or claimed by another device.
         case stale(Int)
         /// Anything else (network, timeout, 5xx, unexpected body): fail open.
         case failed(DeepLinkNowError)

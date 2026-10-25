@@ -2,9 +2,9 @@ import Foundation
 
 /// `[DeepLinkNow]`-prefixed logging (SDK-70/71). Debug lines only with `enableLogs`;
 /// warnings always. Never pass the API key or non-DLN clipboard content here.
-struct Logger {
+struct Logger: Sendable {
     let enabled: Bool
-    let sink: (String) -> Void
+    let sink: @Sendable (String) -> Void
 
     func debug(_ message: @autoclosure () -> String) {
         guard enabled else { return }
