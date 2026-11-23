@@ -50,7 +50,7 @@ final class PrivacyAndPackagingTests: DLNTestCase {
         XCTAssertTrue(podspec.contains("s.ios.deployment_target = '13.0'"))
         let manifest = try read("Package.swift")
         XCTAssertTrue(manifest.contains(".iOS(.v13)"))
-        XCTAssertEqual(DeepLinkNow.sdkVersion, "1.4.1")
+        XCTAssertEqual(DeepLinkNow.sdkVersion, "1.4.2")
         // deeplink.now is not a DLN domain (SDK-31); the pod author contact must be one we own.
         XCTAssertTrue(podspec.contains("admin@deeplinknow.com"))
         XCTAssertFalse(podspec.contains("deeplink.now"))
@@ -109,10 +109,10 @@ final class PrivacyAndPackagingTests: DLNTestCase {
 
     // MARK: IOS-20 / IOS-21 / IOS-22 / SDK-21 / SDK-22 / SDK-60 fingerprint body
 
-    func test_IOS_20_advertisingIdIsAlwaysNull() async throws {
-        // IOS-20 / SDK-61
+    func test_IOS_20_noAdvertisingIdKey() async throws {
+        // IOS-20 / SDK-61: from 1.4.2 the key isn't sent at all (the server reads it as null).
         let fp = try await sentFingerprint()
-        XCTAssertTrue(fp["advertising_id"] is NSNull)
+        XCTAssertNil(fp["advertising_id"])
     }
 
     func test_IOS_22_deviceAndVendorIdAreIDFVOrNullNeverEmpty() async throws {
@@ -150,23 +150,23 @@ final class PrivacyAndPackagingTests: DLNTestCase {
     func test_SDK_22_languageIsTheUsersPreferredLanguageNotTheAppLocalization() {
         // An English-only app on a French device: Locale.current is en_FR, the browser says fr-FR.
         let appLocale = Locale(identifier: "en_FR")
-        XCTAssertEqual(DeviceFingerprint.language(preferred: ["fr-FR", "en-US"], current: appLocale), "fr-FR")
-        XCTAssertEqual(DeviceFingerprint.language(preferred: ["zh-Hans-CN"], current: appLocale), "zh-Hans-CN")
-        XCTAssertEqual(DeviceFingerprint.language(preferred: ["pt_BR@calendar=gregorian"], current: appLocale), "pt-BR")
+        XCTAssertEqual(DeviceSignals.language(preferred: ["fr-FR", "en-US"], current: appLocale), "fr-FR")
+        XCTAssertEqual(DeviceSignals.language(preferred: ["zh-Hans-CN"], current: appLocale), "zh-Hans-CN")
+        XCTAssertEqual(DeviceSignals.language(preferred: ["pt_BR@calendar=gregorian"], current: appLocale), "pt-BR")
         // Fallbacks: the current locale, then en-US.
-        XCTAssertEqual(DeviceFingerprint.language(preferred: [], current: appLocale), "en-FR")
-        XCTAssertEqual(DeviceFingerprint.language(preferred: [" "], current: Locale(identifier: "de_DE")), "de-DE")
-        XCTAssertEqual(DeviceFingerprint.language(preferred: [], current: Locale(identifier: "")), "en-US")
+        XCTAssertEqual(DeviceSignals.language(preferred: [], current: appLocale), "en-FR")
+        XCTAssertEqual(DeviceSignals.language(preferred: [" "], current: Locale(identifier: "de_DE")), "de-DE")
+        XCTAssertEqual(DeviceSignals.language(preferred: [], current: Locale(identifier: "")), "en-US")
         // The default reads Locale.preferredLanguages.
         if let first = Locale.preferredLanguages.first {
-            XCTAssertEqual(DeviceFingerprint.language(), first.replacingOccurrences(of: "_", with: "-"))
+            XCTAssertEqual(DeviceSignals.language(), first.replacingOccurrences(of: "_", with: "-"))
         }
     }
 
     func test_SDK_21_nullableKeysAlwaysPresent() async throws {
         // SDK-21
         let fp = try await sentFingerprint()
-        for key in ["device_id", "advertising_id", "vendor_id", "hardware_fingerprint"] {
+        for key in ["device_id", "vendor_id"] {
             XCTAssertTrue(fp.keys.contains(key), key)
         }
         for key in ["installed_at", "last_opened_at"] {
@@ -179,14 +179,15 @@ final class PrivacyAndPackagingTests: DLNTestCase {
         let fp = try await sentFingerprint()
         let allowed: Set<String> = [
             "user_agent", "platform", "os_version", "device_model", "language", "timezone",
-            "installed_at", "last_opened_at", "device_id", "advertising_id", "vendor_id",
-            "hardware_fingerprint", "screen_width", "screen_height", "pixel_ratio", "metadata",
+            "installed_at", "last_opened_at", "device_id", "vendor_id",
+            "screen_width", "screen_height", "pixel_ratio", "metadata",
         ]
-        XCTAssertEqual(Set(fp.keys).subtracting(allowed), [])
+        XCTAssertEqual(Set(fp.keys), allowed)
         XCTAssertNil(fp["ip_address"])
         let metadata = try XCTUnwrap(fp["metadata"] as? [String: Any])
-        let allowedMetadata: Set<String> = ["screen_width", "screen_height", "pixel_ratio", "color_depth", "is_tablet", "cpu_cores", "source", "connection_type", "device_memory"]
-        XCTAssertEqual(Set(metadata.keys).subtracting(allowedMetadata), [])
+        // 1.4.2: no device hash and no CPU core count (scoring uses neither).
+        let allowedMetadata: Set<String> = ["screen_width", "screen_height", "pixel_ratio", "color_depth", "is_tablet", "source"]
+        XCTAssertEqual(Set(metadata.keys), allowedMetadata)
     }
 
     func test_SDK_61_noAdvertisingIdentifierApis() throws {
@@ -194,6 +195,14 @@ final class PrivacyAndPackagingTests: DLNTestCase {
         let sources = try allSourceText()
         XCTAssertFalse(sources.contains("advertisingIdentifier"))
         XCTAssertFalse(sources.contains("requestTrackingAuthorization"))
+    }
+
+    func test_IOS_42_noInstallerSchemeStringInSources() throws {
+        // IOS-42: App Review (Guideline 2.5.2) rejects a binary containing the installer scheme's
+        // name, even when the SDK only refuses it. Built from parts so this file doesn't carry it either.
+        let sources = try allSourceText().lowercased()
+        XCTAssertFalse(sources.contains("itms-" + "services"))
+        XCTAssertFalse(sources.contains("itms-" + "apps"))
     }
 
     func test_SDK_62_noLocationCarrierOrHardwareIds() throws {
@@ -272,7 +281,7 @@ final class PrivacyAndPackagingTests: DLNTestCase {
         StubURLProtocol.stub("match", json: Fixtures.matchResponse([Fixtures.match(confidence: 61, quality: "MEDIUM")]))
         _ = await DeepLinkNow.checkDeferredDeepLink()
         XCTAssertTrue(logs.joined.contains("clipboard has no DLN link"))
-        XCTAssertTrue(logs.joined.contains("fingerprint match 61"))
+        XCTAssertTrue(logs.joined.contains("device match 61"))
     }
 
     // MARK: SDK-80 / SDK-82 parity

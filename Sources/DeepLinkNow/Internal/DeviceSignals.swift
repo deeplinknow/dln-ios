@@ -30,7 +30,8 @@ struct DeviceSnapshot {
     }
 }
 
-enum DeviceFingerprint {
+enum DeviceSignals {
+
     /// Process start, used as `installed_at` (the SDK instance creation time).
     static let processStart = Date()
 
@@ -39,15 +40,6 @@ enum DeviceFingerprint {
         formatter.formatOptions = [.withInternetDateTime]
         formatter.timeZone = TimeZone(identifier: "UTC")
         return formatter.string(from: date)
-    }
-
-    static func simpleHash(_ str: String) -> String {
-        // Same algorithm as SDK <= 1.0.4, so the value is stable across versions.
-        var hash: Int = 0
-        for char in str.unicodeScalars {
-            hash = ((hash << 5) &- hash) &+ Int(char.value)
-        }
-        return String(hash, radix: 16)
     }
 
     /// SDK-22: the user's preferred language as a BCP-47 tag (`fr-FR`), comparable with the
@@ -72,22 +64,19 @@ enum DeviceFingerprint {
         let language = language()
         let timezone = TimeZone.current.identifier
         let userAgent = "Mozilla/5.0 (\(s.hardwareModel); CPU iOS \(s.systemVersion) like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/\(s.systemVersion) Mobile/15E148 Safari/604.1"
-        let hardwareFingerprint = simpleHash([
-            "ios", s.systemVersion, String(s.screenWidth), String(s.screenHeight),
-            String(s.pixelRatio), language, timezone,
-        ].joined(separator: "|"))
-
         let metadata: [String: Any] = [
             "screen_width": s.screenWidth,
             "screen_height": s.screenHeight,
             "pixel_ratio": s.pixelRatio,
             "color_depth": 32,
             "is_tablet": s.isTablet,
-            "cpu_cores": ProcessInfo.processInfo.processorCount,
             "source": "mobile",
         ]
 
-        let fingerprint: [String: Any] = [
+        // SDK-21 / SDK-60 (1.4.2): only what scoring uses. No advertising ID key (IOS-20) and no
+        // device hash; the server reads both as null (API-SDK-21). The wire key stays as
+        // `/match` expects it until the server accepts `device` (SDK-94).
+        let signals: [String: Any] = [
             "user_agent": userAgent,
             "platform": "ios",
             "os_version": s.systemVersion,
@@ -97,14 +86,12 @@ enum DeviceFingerprint {
             "installed_at": iso8601(processStart),
             "last_opened_at": iso8601(now),
             "device_id": s.vendorId ?? NSNull(),
-            "advertising_id": NSNull(),          // IOS-20: never read the IDFA
             "vendor_id": s.vendorId ?? NSNull(),
-            "hardware_fingerprint": hardwareFingerprint,
             "screen_width": s.screenWidth,
             "screen_height": s.screenHeight,
             "pixel_ratio": s.pixelRatio,
             "metadata": metadata,
         ]
-        return ["fingerprint": fingerprint]
+        return ["fingerprint": signals]
     }
 }

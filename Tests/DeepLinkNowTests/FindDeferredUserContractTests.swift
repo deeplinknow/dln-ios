@@ -43,10 +43,14 @@ final class FindDeferredUserContractTests: DLNTestCase {
         }
         // z.enum(['ios','android'])
         XCTAssertEqual(fp["platform"] as? String, "ios")
-        // z.string().nullable() — key must be present (null or string). Missing key = zod 400.
-        for key in ["device_id", "advertising_id", "vendor_id", "hardware_fingerprint"] {
-            XCTAssertTrue(fp.keys.contains(key), "\(key) must be present (nullable, not optional)")
+        // nullish on the server (API-SDK-21). device_id / vendor_id are always sent (string or
+        // null); advertising_id and hardware_fingerprint are not sent from 1.4.2 (SDK-21).
+        for key in ["device_id", "vendor_id"] {
+            XCTAssertTrue(fp.keys.contains(key), "\(key) must be present")
             XCTAssertTrue(fp[key] is String || fp[key] is NSNull, "\(key) must be string or null")
+        }
+        for key in ["advertising_id", "hardware_fingerprint"] {
+            XCTAssertNil(fp[key], "\(key) is no longer sent")
         }
         // No snake/camel drift: none of the Swift property names should leak.
         for camel in ["userAgent", "osVersion", "deviceModel", "installedAt", "lastOpenedAt",

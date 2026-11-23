@@ -11,7 +11,7 @@ import UIKit
 public final class DeepLinkNow {
 
     /// SDK version. Kept in sync with `DeepLinkNow.podspec` (IOS-01).
-    public static let sdkVersion = "1.4.1"
+    public static let sdkVersion = "1.4.2"
 
     static let deferredCompletedKey = "com.deeplinknow.deferredCheckCompleted"
     static let clipboardCheckedKey = "com.deeplinknow.clipboardChecked"
@@ -420,10 +420,10 @@ public final class DeepLinkNow {
         for match in response.matches {
             guard let deeplink = match.deeplink else { continue }
             if let min = options.minConfidence, match.confidenceScore < min { continue }
-            log.debug("checkDeferredDeepLink: fingerprint match \(match.confidenceScore) \(match.matchQuality.rawValue)")
+            log.debug("checkDeferredDeepLink: device match \(match.confidenceScore) \(match.matchQuality.rawValue)")
             return makeDeferred(from: match, deeplink: deeplink, client: client)
         }
-        log.debug("checkDeferredDeepLink: no eligible fingerprint candidate (\(response.matches.count) returned)")
+        log.debug("checkDeferredDeepLink: no eligible device-match candidate (\(response.matches.count) returned)")
         return nil
     }
 
@@ -570,7 +570,7 @@ public final class DeepLinkNow {
 
     private static func fetchMatches(_ client: Client) async throws -> MatchResponse {
         let snapshot = await MainActor.run { DeviceSnapshot.current() }
-        let body = DeviceFingerprint.body(snapshot: snapshot)
+        let body = DeviceSignals.body(snapshot: snapshot)
         client.logger.debug("Sending match request")
         let data = try await post(client.api, "match", body: body)
         do {

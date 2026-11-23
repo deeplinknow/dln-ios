@@ -2,6 +2,14 @@
 
 All notable changes to the DeepLinkNow iOS SDK (CocoaPods `DeepLinkNow`, Swift Package Manager `dln-ios`). iOS, Android and React Native share one major.minor version (SDK-84).
 
+## 1.4.2 (unreleased)
+
+App Review fix and a smaller match request. No API changes.
+
+- **App Review Guideline 2.5.2.** The binary no longer contains the string `itms-services`. 1.4.0 and 1.4.1 listed it among the schemes `handle(_:)` refuses, and App Review flagged the string itself. `itms` and every `itms-…` scheme are now refused by prefix, so the same schemes (and any other `itms-…` scheme Apple adds) are refused without being named (IOS-42).
+- **The match request sends only what scoring uses** (SDK-21, SDK-60). `advertising_id` (always `null`), `hardware_fingerprint` (a hash the server never matched; screen size scores instead) and `metadata.cpu_cores` (never scored) are no longer sent. Match scores don't change.
+- `DeepLinkNow.sdkVersion` is `"1.4.2"`.
+
 ## 1.4.1 (2026-10-25)
 
 Fixes to 1.4.0. No breaking changes.

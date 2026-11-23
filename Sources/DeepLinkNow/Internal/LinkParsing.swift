@@ -107,11 +107,19 @@ enum LinkParsing {
     }
 
     /// SDK-87: schemes that are never an app's own, even if an app lists them.
+    /// Apple's store and installer schemes (`itms` and every `itms-…`) are matched by
+    /// `isSystemScheme(_:)` as a prefix, not listed: App Review rejects a binary that contains
+    /// the installer scheme's name as a string (Guideline 2.5.2), even when it is only refused (IOS-42).
     static let systemSchemes: Set<String> = [
         "http", "https", "mailto", "tel", "telprompt", "sms", "facetime", "facetime-audio",
-        "content", "file", "intent", "itms", "itms-apps", "itms-appss", "itms-services",
-        "market", "maps", "data", "javascript", "about", "blob", "ftp", "ws", "wss",
+        "content", "file", "intent", "market", "maps", "data", "javascript", "about", "blob",
+        "ftp", "ws", "wss",
     ]
+
+    /// SDK-87 / IOS-42: `scheme` must be lowercased.
+    static func isSystemScheme(_ scheme: String) -> Bool {
+        systemSchemes.contains(scheme) || scheme == "itms" || scheme.hasPrefix("itms-")
+    }
 
     /// SDK-87 / IOS-38: `myapp://products/123?x=1` → path `/products/123` (the host is the first
     /// path segment), query per FLOW-53. `schemes` must be lowercased. A `dln` fragment
@@ -119,7 +127,7 @@ enum LinkParsing {
     static func parseScheme(url: URL, schemes: Set<String>) -> Parsed? {
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
               let scheme = components.scheme?.lowercased(),
-              !systemSchemes.contains(scheme), schemes.contains(scheme) else { return nil }
+              !isSystemScheme(scheme), schemes.contains(scheme) else { return nil }
         let host = components.percentEncodedHost ?? ""
         var rest = components.percentEncodedPath
         if !host.isEmpty, !rest.isEmpty, !rest.hasPrefix("/") { rest = "/" + rest }

@@ -401,7 +401,7 @@ extension DeepLinkNow {
         let declared: [String] = optionSchemes.isEmpty
             ? environment.withLock { $0.declaredURLSchemes }()
             : Array(optionSchemes)
-        let appSchemes = Set(declared.map { $0.lowercased() }).subtracting(LinkParsing.systemSchemes)
+        let appSchemes = Set(declared.map { $0.lowercased() }.filter { !LinkParsing.isSystemScheme($0) })
         guard let parsed = LinkParsing.parseScheme(url: url, schemes: appSchemes) else { return nil }
         return DLNLink(type: .direct, path: parsed.path, queryParams: parsed.queryParams,
                        fullPath: parsed.fullPath, url: parsed.url, source: .scheme,

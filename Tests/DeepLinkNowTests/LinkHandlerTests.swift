@@ -393,6 +393,27 @@ final class LinkHandlerTests: DLNTestCase {
         XCTAssertTrue(recorder.links.isEmpty)
     }
 
+    func test_IOS_42_storeAndInstallerSchemesNeverCount() async throws {
+        // IOS-42: `itms` and every `itms-…` scheme is a system scheme without being named in the SDK.
+        let installer = "itms-" + "services"
+        declare(["itms", "ITMS-Apps", "itms-appss", installer, "itms-beta", "itmsx"])
+        register(DLNLinkOptions(useClipboard: false))
+        XCTAssertFalse(DeepLinkNow.handle(url("itms://apps.apple.com/app/id1")))
+        XCTAssertFalse(DeepLinkNow.handle(url("itms-apps://apps.apple.com/app/id1")))
+        XCTAssertFalse(DeepLinkNow.handle(url("itms-appss://apps.apple.com/app/id1")))
+        XCTAssertFalse(DeepLinkNow.handle(url("\(installer)://?action=download-manifest&url=https://x.example/m.plist")))
+        XCTAssertFalse(DeepLinkNow.handle(url("ITMS-BETA://x")))
+        register(DLNLinkOptions(useClipboard: false, schemes: [installer, "itms-apps"]))
+        XCTAssertFalse(DeepLinkNow.handle(url("\(installer)://?action=download-manifest")))
+        XCTAssertFalse(DeepLinkNow.handle(url("itms-apps://apps.apple.com/app/id1")))
+        XCTAssertNil(LinkParsing.parseScheme(url: url("\(installer)://x"), schemes: [installer]))
+        // Only the `itms` family: a scheme that merely starts with the letters is still the app's.
+        register(DLNLinkOptions(useClipboard: false, schemes: ["itmsx"]))
+        XCTAssertTrue(DeepLinkNow.handle(url("itmsx://products/1")))
+        let links = await recorder.wait(for: 1)
+        XCTAssertEqual(links.map { $0.path }, ["/products/1"])
+    }
+
     func test_IOS_38_schemeOpensAreNeverResolved() async throws {
         // SDK-87 / SDK-90: resolve does not apply to scheme opens.
         declare(["myapp"])
