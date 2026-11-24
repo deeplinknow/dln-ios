@@ -2,7 +2,7 @@
 
 All notable changes to the DeepLinkNow iOS SDK (CocoaPods `DeepLinkNow`, Swift Package Manager `dln-ios`). iOS, Android and React Native share one major.minor version (SDK-84).
 
-## 1.4.2 (unreleased)
+## 1.4.2 (2026-11-24)
 
 App Review fix and a smaller match request. No API changes.
 
